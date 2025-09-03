@@ -1,0 +1,47 @@
+{
+  "name": "hamichlol-offline",
+  "version": "1.0.0",
+  "description": "אפליקציית אלקטרון עם MediaWiki מקומית",
+  "main": "src/main.js",
+  "scripts": {
+    "start": "electron .",
+    "dev": "set DEV_MODE=true&& electron .",
+    "test": "mocha test/**/*.test.js",
+    "pack": "electron-builder --dir",
+    "dist": "electron-builder",
+    "postinstall": "electron-builder install-app-deps"
+  },
+  "author": "",
+  "license": "ISC",
+  "devDependencies": {
+    "electron": "^26.0.0",
+    "electron-builder": "^24.6.0",
+    "chai": "^4.3.7",
+    "mocha": "^10.2.0"
+  },
+  "dependencies": {
+    "adm-zip": "^0.5.10",
+    "download": "^8.0.0",
+    "mysql2": "^3.6.0",
+    "node-cmd": "^5.0.0",
+    "portfinder": "^1.0.32"
+  },
+  "build": {
+    "appId": "com.hamichlol.offline",
+    "productName": "המכלול אופליין",
+    "extraResources": [
+      {
+        "from": "resources/",
+        "to": "resources/"
+      }
+    ],
+    "win": {
+      "target": "nsis"
+    },
+    "nsis": {
+      "oneClick": false,
+      "allowToChangeInstallationDirectory": true,
+      "installerIcon": "build/icon.ico"
+    }
+  }
+}
