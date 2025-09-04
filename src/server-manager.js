@@ -5,9 +5,13 @@ const download = require('download');
 const admZip = require('adm-zip');
 const portfinder = require('portfinder');
 const cmd = require('node-cmd');
+const https = require('https');
+const fsExtra = require('fs-extra'); // הוסף למעלה
+const insecureAgent = new https.Agent({ rejectUnauthorized: false });
 
 // Paths
 const resourcesPath = path.join(process.resourcesPath || path.join(__dirname, '..'), 'resources');
+console.log('Resources Path:', resourcesPath);
 const serverPath = path.join(resourcesPath, 'server');
 const mediaWikiPath = path.join(resourcesPath, 'mediawiki');
 
@@ -66,11 +70,11 @@ async function downloadServers() {
   // Download and extract PHP server if not already downloaded
   if (!fs.existsSync(path.join(serverPath, 'php'))) {
     console.log('Downloading PHP server...');
-    const phpUrl = 'https://windows.php.net/downloads/releases/php-8.1.22-Win32-vs16-x64.zip';
+    const phpUrl = 'https://windows.php.net/downloads/releases/php-8.4.12-Win32-vs17-x64.zip';
     const phpZipPath = path.join(serverPath, 'php.zip');
-    
-    await download(phpUrl, serverPath, { filename: 'php.zip' });
-    
+
+    await download(phpUrl, serverPath, { filename: 'php.zip', agent: { https: insecureAgent } });
+
     const zip = new admZip(phpZipPath);
     zip.extractAllTo(path.join(serverPath, 'php'), true);
     
@@ -98,7 +102,7 @@ async function downloadServers() {
     const mysqlUrl = 'https://downloads.mariadb.com/MariaDB/mariadb-10.11.5/winx64-packages/mariadb-10.11.5-winx64.zip';
     const mysqlZipPath = path.join(serverPath, 'mysql.zip');
     
-    await download(mysqlUrl, serverPath, { filename: 'mysql.zip' });
+    await download(mysqlUrl, serverPath, { filename: 'mysql.zip', agent: { https: insecureAgent } });
     
     const zip = new admZip(mysqlZipPath);
     zip.extractAllTo(serverPath, true);
@@ -141,7 +145,7 @@ async function downloadServers() {
     const mediawikiUrl = 'https://releases.wikimedia.org/mediawiki/1.39/mediawiki-1.39.5.zip';
     const mediawikiZipPath = path.join(mediaWikiPath, 'mediawiki.zip');
     
-    await download(mediawikiUrl, mediaWikiPath, { filename: 'mediawiki.zip' });
+    await download(mediawikiUrl, mediaWikiPath, { filename: 'mediawiki.zip', agent: { https: insecureAgent } });
     
     const zip = new admZip(mediawikiZipPath);
     zip.extractAllTo(mediaWikiPath, true);
