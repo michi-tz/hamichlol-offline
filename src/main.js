@@ -1,9 +1,14 @@
 const { app, BrowserWindow, ipcMain } = require('electron');
 const path = require('path');
 const fs = require('fs');
-const { downloadServers, installMediaWiki, startServers, stopServers } = require('./server-manager');
+const { setDataPath, downloadServers, installMediaWiki, startServers, stopServers } = require('./server-manager');
 
 let mainWindow;
+let isQuitting = false;
+
+// Servers, MediaWiki and the database must live in a writable location.
+// The install directory (process.resourcesPath) is usually read-only.
+setDataPath(process.env.HAMICHLOL_DATA_DIR || path.join(app.getPath('userData'), 'data'));
 
 function createWindow() {
   mainWindow = new BrowserWindow({
@@ -33,9 +38,24 @@ app.whenReady().then(() => {
 
 app.on('window-all-closed', () => {
   if (process.platform !== 'darwin') {
-    stopServers();
     app.quit();
   }
+});
+
+// Wait for the servers to shut down before the app exits, so MySQL is not left
+// running in the background or killed mid-write.
+app.on('before-quit', async (event) => {
+  if (isQuitting) {
+    return;
+  }
+  event.preventDefault();
+  isQuitting = true;
+  try {
+    await stopServers();
+  } catch (error) {
+    console.error('Failed to stop servers on quit:', error);
+  }
+  app.quit();
 });
 
 // IPC handlers for communication with renderer process

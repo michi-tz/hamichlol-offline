@@ -101,15 +101,15 @@
       <form id="wikiSetupForm">
         <div class="form-group">
           <label for="dbName">שם מסד הנתונים:</label>
-          <input type="text" id="dbName" value="wikidb" required>
+          <input type="text" id="dbName" value="wikidb" pattern="[A-Za-z0-9_]{1,64}" title="אותיות לטיניות, ספרות וקו תחתון בלבד" required>
         </div>
         <div class="form-group">
           <label for="dbUser">שם משתמש למסד נתונים:</label>
-          <input type="text" id="dbUser" value="wikiuser" required>
+          <input type="text" id="dbUser" value="wikiuser" pattern="[A-Za-z0-9_]{1,64}" title="אותיות לטיניות, ספרות וקו תחתון בלבד" required>
         </div>
         <div class="form-group">
           <label for="dbPassword">סיסמה למסד נתונים:</label>
-          <input type="password" id="dbPassword" value="password" required>
+          <input type="password" id="dbPassword" required>
         </div>
         <div class="form-group">
           <label for="wikiName">שם האתר:</label>
@@ -120,8 +120,8 @@
           <input type="text" id="adminUser" value="admin" required>
         </div>
         <div class="form-group">
-          <label for="adminPassword">סיסמת מנהל:</label>
-          <input type="password" id="adminPassword" value="admin123" required>
+          <label for="adminPassword">סיסמת מנהל (לפחות 10 תווים):</label>
+          <input type="password" id="adminPassword" minlength="10" required>
         </div>
         <button type="submit">התקן MediaWiki</button>
       </form>
@@ -228,7 +228,7 @@
           stopServersBtn.disabled = false;
           
           // Show wiki in iframe
-          wikiBrowser.src = `http://localhost:${result.phpPort}`;
+          wikiBrowser.src = `http://127.0.0.1:${result.phpPort}`;
           wikiBrowser.style.display = 'block';
         } else {
           statusEl.textContent = `סטטוס: שגיאה בהפעלת השרתים - ${result.error}`;
