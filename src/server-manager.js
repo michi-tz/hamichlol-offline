@@ -54,6 +54,9 @@ let phpProcess = null;
 let mysqlProcess = null;
 let devServer = null;
 
+// Servers that were spawned but do not accept connections yet: key -> { child, port }
+const startingServers = new Map();
+
 // Server ports (valid while the matching process is running)
 let phpPort = null;
 let mysqlPort = null;
@@ -140,7 +143,19 @@ function resolveMediaWiki() {
   }
   const found = useSystemTools() ? systemTools.findSystemMediaWiki() : null;
   if (found && found.usable) {
-    return { source: 'system', dir: found.dir, version: found.version };
+    // An installed MediaWiki newer than the available PHP supports cannot be
+    // installed; the version this app downloads works with every accepted PHP
+    const php = resolvePhp();
+    const phpTooOld = Boolean(found.minPhp && php.version) && systemTools.compareVersions(php.version, found.minPhp) < 0;
+    if (!phpTooOld) {
+      return { source: 'system', dir: found.dir, version: found.version };
+    }
+    return {
+      source: 'download',
+      dir: null,
+      version: DOWNLOADS.mediawiki.version,
+      problem: `${found.dir} (${found.version}): דורש PHP ${found.minPhp} ומעלה`
+    };
   }
   return { source: 'download', dir: null, version: DOWNLOADS.mediawiki.version };
 }
@@ -249,8 +264,21 @@ function logOutput(child, label) {
 
 // Spawn a server process and resolve once it accepts TCP connections on `port`.
 // Rejects (and kills the process) if it fails to start, exits early or times out.
-async function spawnServer(label, file, args, port, options = {}) {
+//
+// `key` ('mysql' or 'php') tracks the process while it is still starting, so
+// that stopping the servers or a crash at that moment does not leave it behind.
+async function spawnServer(label, key, file, args, port, options = {}) {
   const child = spawn(file, args, { windowsHide: true, ...options });
+  startingServers.set(key, { child, port });
+  writeRunState();
+  try {
+    return await waitUntilListening(label, child, port);
+  } finally {
+    startingServers.delete(key);
+  }
+}
+
+async function waitUntilListening(label, child, port) {
   let failure = null;
   child.once('error', error => {
     failure = failure || error;
@@ -272,7 +300,11 @@ async function spawnServer(label, file, args, port, options = {}) {
     await delay(250);
   }
 
-  child.kill();
+  try {
+    await terminate(child);
+  } catch (error) {
+    console.error(`${label} could not be stopped after it failed to start: ${error.message}`);
+  }
   throw failure;
 }
 
@@ -339,6 +371,13 @@ function writeRunState() {
   }
   if (phpProcess) {
     state.php = { pid: phpProcess.pid, port: phpPort, exe: phpProcess.spawnfile, marker: phpProcessMarker() };
+  }
+  // Servers that are still starting are saved too, in case the app dies meanwhile
+  const markers = { mysql: dbProcessMarker(), php: phpProcessMarker() };
+  for (const [key, { child, port }] of startingServers) {
+    if (child.pid && child.exitCode === null && child.signalCode === null) {
+      state[key] = { pid: child.pid, port, exe: child.spawnfile, marker: markers[key] };
+    }
   }
   if (Object.keys(state).length === 0) {
     fs.rmSync(runStateFile, { force: true });
@@ -611,7 +650,7 @@ function getStatus() {
         path: database.exe || null,
         problem: database.problem || null
       },
-      mediawiki: { source: mediawiki.source, version: mediawiki.version, path: mediawiki.dir }
+      mediawiki: { source: mediawiki.source, version: mediawiki.version, path: mediawiki.dir, problem: mediawiki.problem || null }
     },
     canDownloadServers: CAN_DOWNLOAD_SERVERS,
     versions: {
@@ -833,9 +872,16 @@ async function mysqlAdminShutdown(port) {
   });
   // The server closes the connection while shutting down
   connection.on('error', () => {});
+  // A server that accepts the connection but never answers must not block the
+  // forced kill that follows a failed graceful shutdown
+  let timer;
+  const timeout = new Promise((resolve, reject) => {
+    timer = setTimeout(() => reject(new Error('Timed out waiting for the SHUTDOWN command')), MYSQL_SHUTDOWN_TIMEOUT_MS);
+  });
   try {
-    await connection.query('SHUTDOWN');
+    await Promise.race([connection.query('SHUTDOWN'), timeout]);
   } finally {
+    clearTimeout(timer);
     connection.destroy();
   }
 }
@@ -850,7 +896,7 @@ async function startMysql() {
 
   const database = requireDatabase();
   const port = await portfinder.getPortPromise({ port: DEFAULT_MYSQL_PORT });
-  const child = await spawnServer('MySQL', database.exe, dbServerArgs(database, port), port);
+  const child = await spawnServer('MySQL', 'mysql', database.exe, dbServerArgs(database, port), port);
 
   mysqlProcess = child;
   mysqlPort = port;
@@ -878,6 +924,7 @@ async function startPhp() {
   const port = await portfinder.getPortPromise({ port: DEFAULT_PHP_PORT });
   const child = await spawnServer(
     'PHP',
+    'php',
     php.exe,
     phpArgs(php, ['-S', `${LOOPBACK_HOST}:${port}`, '-t', mediaWikiPath]),
     port,
@@ -1044,9 +1091,13 @@ async function stopServers() {
     console.log('Mock PHP server stopped');
   }
 
-  const wasRunning = phpProcess !== null || mysqlProcess !== null;
+  const wasRunning = phpProcess !== null || mysqlProcess !== null || startingServers.size > 0;
 
   try {
+    // Servers caught in the middle of starting; their pending start then fails
+    for (const { child } of [...startingServers.values()]) {
+      await terminate(child);
+    }
     if (phpProcess) {
       await terminate(phpProcess);
       phpProcess = null;

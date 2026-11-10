@@ -224,7 +224,7 @@
       const { tools, versions, canDownloadServers } = status;
       const databaseName = tools.database.flavor === 'mysql' ? 'MySQL' : 'MariaDB';
       const mediawiki = tools.mediawiki.source === 'download'
-        ? { source: null }
+        ? { source: null, problem: tools.mediawiki.problem }
         : tools.mediawiki;
       toolsList.replaceChildren(
         describeTool('PHP', tools.php, versions.php, canDownloadServers),

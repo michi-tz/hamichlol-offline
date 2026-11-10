@@ -309,9 +309,21 @@ function findSystemDatabase(candidates) {
 // MediaWiki
 // ---------------------------------------------------------------------------
 
-// Returns { dir, version, usable, reason }.
+// The oldest PHP a MediaWiki installation accepts, from its composer.json
+// ("php": ">=8.1.0"), or null when it does not say.
+function readMediaWikiMinPhp(dir) {
+  try {
+    const composer = JSON.parse(fs.readFileSync(path.join(dir, 'composer.json'), 'utf8'));
+    const match = />=\s*(\d+(?:\.\d+){0,2})/.exec(String(composer.require && composer.require.php));
+    return match ? match[1] : null;
+  } catch (error) {
+    return null;
+  }
+}
+
+// Returns { dir, version, minPhp, usable, reason }.
 function inspectMediaWiki(dir) {
-  const result = { dir, version: null, usable: false, reason: null };
+  const result = { dir, version: null, minPhp: null, usable: false, reason: null };
   let defines;
   try {
     defines = fs.readFileSync(path.join(dir, 'includes', 'Defines.php'), 'utf8');
@@ -331,6 +343,7 @@ function inspectMediaWiki(dir) {
   }
 
   result.version = match[1];
+  result.minPhp = readMediaWikiMinPhp(dir);
   if (compareVersions(result.version, MIN_VERSIONS.mediawiki) < 0) {
     result.reason = `נדרשת גרסה ${MIN_VERSIONS.mediawiki} ומעלה`;
     return result;

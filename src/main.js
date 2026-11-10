@@ -20,6 +20,9 @@ function createWindow() {
   });
 
   mainWindow.loadFile(path.join(__dirname, 'renderer', 'index.html'));
+  mainWindow.on('closed', () => {
+    mainWindow = null;
+  });
 
   // Uncomment for development
   // mainWindow.webContents.openDevTools();
@@ -39,12 +42,17 @@ function setupApp() {
   });
 
   app.on('second-instance', () => {
-    if (mainWindow) {
-      if (mainWindow.isMinimized()) {
-        mainWindow.restore();
+    if (!mainWindow) {
+      // On macOS the app keeps running after its last window was closed
+      if (app.isReady()) {
+        createWindow();
       }
-      mainWindow.focus();
+      return;
     }
+    if (mainWindow.isMinimized()) {
+      mainWindow.restore();
+    }
+    mainWindow.focus();
   });
 
   app.on('window-all-closed', () => {
@@ -78,12 +86,19 @@ if (app.requestSingleInstanceLock()) {
   app.quit();
 }
 
+// The window may be closed while a long operation is still running
+function sendStatus(message) {
+  if (mainWindow && !mainWindow.isDestroyed()) {
+    mainWindow.webContents.send('status-update', message);
+  }
+}
+
 // IPC handlers for communication with renderer process
 ipcMain.handle('get-status', () => getStatus());
 
 ipcMain.handle('download-servers', async () => {
   try {
-    mainWindow.webContents.send('status-update', 'מכין שרתים...');
+    sendStatus('מכין שרתים...');
     await downloadServers();
     return { success: true };
   } catch (error) {
@@ -94,7 +109,7 @@ ipcMain.handle('download-servers', async () => {
 
 ipcMain.handle('install-mediawiki', async (event, config) => {
   try {
-    mainWindow.webContents.send('status-update', 'מתקין MediaWiki...');
+    sendStatus('מתקין MediaWiki...');
     await installMediaWiki(config);
     return { success: true };
   } catch (error) {
@@ -105,9 +120,9 @@ ipcMain.handle('install-mediawiki', async (event, config) => {
 
 ipcMain.handle('start-servers', async () => {
   try {
-    mainWindow.webContents.send('status-update', 'מפעיל שרתים...');
+    sendStatus('מפעיל שרתים...');
     const ports = await startServers();
-    mainWindow.webContents.send('status-update', 'השרתים פועלים');
+    sendStatus('השרתים פועלים');
     return { success: true, ...ports };
   } catch (error) {
     console.error('Failed to start servers:', error);
@@ -117,9 +132,9 @@ ipcMain.handle('start-servers', async () => {
 
 ipcMain.handle('stop-servers', async () => {
   try {
-    mainWindow.webContents.send('status-update', 'מכבה שרתים...');
+    sendStatus('מכבה שרתים...');
     await stopServers();
-    mainWindow.webContents.send('status-update', 'השרתים כבויים');
+    sendStatus('השרתים כבויים');
     return { success: true };
   } catch (error) {
     console.error('Failed to stop servers:', error);

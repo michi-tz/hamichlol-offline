@@ -298,7 +298,11 @@ describe('Real mode with fake servers', function() {
     fs.writeFileSync(phpIni, '');
     writeScript(path.join(mariadbDir, 'bin', 'mariadbd.exe'), `
       const port = +process.argv.find(a => a.startsWith('--port=')).split('=')[1];
-      require('net').createServer(s => s.end()).listen(port, '127.0.0.1');
+      if (process.env.FAKE_SERVER_NEVER_READY) {
+        setInterval(() => {}, 1000);
+      } else {
+        require('net').createServer(s => s.end()).listen(port, '127.0.0.1');
+      }
     `);
     // Graceful shutdown "fails", so the code falls back to killing the process
     writeScript(path.join(mariadbDir, 'bin', 'mariadb-admin.exe'), 'process.exit(1);');
@@ -397,6 +401,27 @@ describe('Real mode with fake servers', function() {
       await stopServers();
     } finally {
       other.kill();
+    }
+  });
+
+  it('should stop a server that is still starting', async function() {
+    process.env.FAKE_SERVER_NEVER_READY = '1';
+    try {
+      const starting = startServers().then(() => null, error => error);
+      await new Promise(resolve => setTimeout(resolve, 600));
+
+      // Saved already, so a crash at this point would not leave it behind either
+      const state = JSON.parse(fs.readFileSync(getPaths().runStateFile, 'utf8'));
+      expect(isAlive(state.mysql.pid)).to.be.true;
+      expect(state.mysql.marker).to.equal(`--datadir=${getPaths().dbDataDir}`);
+
+      await stopServers();
+      expect(isAlive(state.mysql.pid)).to.be.false;
+      expect(await starting).to.be.an('error');
+      expect(getStatus().running).to.be.false;
+      expect(fs.existsSync(getPaths().runStateFile)).to.be.false;
+    } finally {
+      delete process.env.FAKE_SERVER_NEVER_READY;
     }
   });
 
@@ -539,7 +564,12 @@ describe('Installed software detection', function() {
     const incomplete = fakeMediaWiki('mw-incomplete', '1.43.0');
     fs.rmSync(path.join(incomplete, 'vendor'), { recursive: true });
 
-    expect(systemTools.findSystemMediaWiki([good])).to.deep.equal({ dir: good, version: '1.39.7', usable: true, reason: null });
+    expect(systemTools.findSystemMediaWiki([good])).to.deep.equal({
+      dir: good, version: '1.39.7', minPhp: null, usable: true, reason: null
+    });
+
+    fs.writeFileSync(path.join(good, 'composer.json'), JSON.stringify({ require: { php: '>=7.4.3', 'ext-xml': '*' } }));
+    expect(systemTools.findSystemMediaWiki([good]).minPhp).to.equal('7.4.3');
     expect(systemTools.findSystemMediaWiki([old]).usable).to.be.false;
     expect(systemTools.findSystemMediaWiki([incomplete]).usable).to.be.false;
     expect(systemTools.findSystemMediaWiki([path.join(tempDir, 'missing')]).usable).to.be.false;
@@ -705,6 +735,29 @@ describe('Real mode with installed software', function() {
 
     await stopServers();
     expect(getStatus().running).to.be.false;
+  });
+
+  it('should not use an installed MediaWiki that needs a newer PHP', function() {
+    const source = process.env[systemTools.ENV.mediawiki];
+    const copy = getPaths().mediaWikiPath;
+    const hidden = `${copy}.hidden`;
+    fs.renameSync(copy, hidden);
+    fs.writeFileSync(path.join(source, 'composer.json'), JSON.stringify({ require: { php: '>=8.4.0' } }));
+    systemTools.resetCache();
+    try {
+      const { mediawiki } = getStatus().tools;
+      expect(mediawiki.source).to.equal('download');
+      expect(mediawiki.version).to.equal(DOWNLOADS.mediawiki.version);
+      expect(mediawiki.problem).to.include('8.4.0');
+
+      fs.writeFileSync(path.join(source, 'composer.json'), JSON.stringify({ require: { php: '>=8.1.0' } }));
+      systemTools.resetCache();
+      expect(getStatus().tools.mediawiki.source).to.equal('system');
+    } finally {
+      fs.rmSync(path.join(source, 'composer.json'));
+      fs.renameSync(hidden, copy);
+      systemTools.resetCache();
+    }
   });
 
   it('should ignore installed software when it is switched off', function() {
