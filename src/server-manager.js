@@ -22,6 +22,11 @@ const DB_PORT_ENV = 'HAMICHLOL_DB_PORT';
 const SERVER_START_TIMEOUT_MS = 60000;
 const MYSQL_SHUTDOWN_TIMEOUT_MS = 15000;
 const MYSQL_CONNECT_TIMEOUT_MS = 5000;
+const PROCESS_KILL_TIMEOUT_MS = 5000;
+
+// Schemas of the database server itself; (re)creating the wiki database under
+// one of these names would destroy the server's own tables.
+const RESERVED_DB_NAMES = ['mysql', 'information_schema', 'performance_schema', 'sys'];
 
 const IDENTIFIER_RE = /^[A-Za-z0-9_]{1,64}$/;
 const MIN_ADMIN_PASSWORD_LENGTH = 10;
@@ -36,9 +41,6 @@ const MARIADB_BINARIES = {
 
 // Automatic downloads are Windows builds; elsewhere installed software is used.
 const CAN_DOWNLOAD_SERVERS = process.platform === 'win32';
-
-// From this MySQL version the X protocol plugin is built in and on by default.
-const MYSQLX_BUILTIN_SINCE = '8.0.0';
 
 // Unix socket paths are limited to about 100 characters.
 const MAX_SOCKET_PATH_LENGTH = 100;
@@ -196,10 +198,10 @@ function dbServerArgs(database, port) {
       args.push('--user=root');
     }
   }
-  if (database.flavor === 'mysql' && systemTools.compareVersions(database.version, MYSQLX_BUILTIN_SINCE) >= 0) {
+  if (database.flavor === 'mysql') {
     // MySQL 8 also listens on a second (X protocol) port unless disabled.
-    // Older servers do not know the option and would refuse to start.
-    args.push('--mysqlx=OFF');
+    // "loose": servers without the X plugin ignore the option instead of refusing to start.
+    args.push('--loose-mysqlx=OFF');
   }
   return args;
 }
@@ -287,6 +289,18 @@ function waitForExit(child, timeoutMs) {
   });
 }
 
+// Kill a child process and wait until it has really exited, so its files and
+// port are free again. Rejects if it is still running after a forced kill.
+async function terminate(child) {
+  child.kill();
+  try {
+    await waitForExit(child, PROCESS_KILL_TIMEOUT_MS);
+  } catch (error) {
+    child.kill('SIGKILL');
+    await waitForExit(child, PROCESS_KILL_TIMEOUT_MS);
+  }
+}
+
 // ---------------------------------------------------------------------------
 // Leftover processes from a previous run
 //
@@ -303,14 +317,28 @@ function readRunState() {
   }
 }
 
+// Entries of servers this process could not confirm as stopped; they are kept in
+// the file so a later start can try again.
+let unresolvedRunState = {};
+
+// A command-line argument only this app's server has, so that another server
+// started from the same program is never mistaken for a leftover of ours.
+function dbProcessMarker() {
+  return `--datadir=${getPaths().dbDataDir}`;
+}
+
+function phpProcessMarker() {
+  return getPaths().mediaWikiPath;
+}
+
 function writeRunState() {
   const { runStateFile } = getPaths();
-  const state = {};
+  const state = { ...unresolvedRunState };
   if (mysqlProcess) {
-    state.mysql = { pid: mysqlProcess.pid, port: mysqlPort, exe: mysqlProcess.spawnfile };
+    state.mysql = { pid: mysqlProcess.pid, port: mysqlPort, exe: mysqlProcess.spawnfile, marker: dbProcessMarker() };
   }
   if (phpProcess) {
-    state.php = { pid: phpProcess.pid, port: phpPort, exe: phpProcess.spawnfile };
+    state.php = { pid: phpProcess.pid, port: phpPort, exe: phpProcess.spawnfile, marker: phpProcessMarker() };
   }
   if (Object.keys(state).length === 0) {
     fs.rmSync(runStateFile, { force: true });
@@ -320,42 +348,66 @@ function writeRunState() {
   fs.writeFileSync(runStateFile, JSON.stringify(state, null, 2));
 }
 
-// True only if `pid` is alive AND still runs `exe`, so a reused PID never
-// gets killed by mistake.
-async function isProcessRunning(pid, exe) {
-  if (!Number.isInteger(pid) || pid <= 0) {
-    return false;
+// Full command line of a running process. Throws when it cannot be read.
+async function readCommandLine(pid) {
+  if (process.platform === 'linux') {
+    return fs.readFileSync(`/proc/${pid}/cmdline`, 'utf8').split('\0').join(' ');
+  }
+  if (process.platform === 'win32') {
+    return run('powershell.exe', [
+      '-NoProfile', '-NonInteractive', '-Command',
+      `(Get-CimInstance Win32_Process -Filter "ProcessId=${pid}").CommandLine`
+    ]);
+  }
+  // macOS and other Unix systems; -ww: do not truncate the command
+  return run('ps', ['-ww', '-o', 'command=', '-p', String(pid)]);
+}
+
+// Whether the process saved in a run-state entry is still this app's server:
+// 'ours'    - alive, and its command line has the program and our marker
+// 'gone'    - exited, or the PID now belongs to some other process
+// 'unknown' - alive, but its command line could not be read
+async function identifyProcess(entry) {
+  const { pid, exe, marker } = entry || {};
+  if (!Number.isInteger(pid) || pid <= 0 || typeof exe !== 'string' || typeof marker !== 'string' || !marker) {
+    return 'gone';
   }
   try {
     process.kill(pid, 0);
   } catch (error) {
     if (error.code !== 'EPERM') {
-      return false;
+      return 'gone';
     }
+  }
+
+  let commandLine;
+  try {
+    commandLine = await readCommandLine(pid);
+  } catch (error) {
+    // The process may have exited between the two checks
+    try {
+      process.kill(pid, 0);
+    } catch (killError) {
+      if (killError.code !== 'EPERM') {
+        return 'gone';
+      }
+    }
+    return 'unknown';
   }
 
   if (process.platform === 'win32') {
-    try {
-      const output = await run('tasklist', ['/FI', `PID eq ${pid}`, '/FO', 'CSV', '/NH']);
-      const imageName = (output.split(',')[0] || '').replace(/"/g, '').trim().toLowerCase();
-      return imageName === path.basename(exe).toLowerCase();
-    } catch (error) {
-      return false;
-    }
+    commandLine = commandLine.toLowerCase();
+    return commandLine.includes(path.basename(exe).toLowerCase()) && commandLine.includes(marker.toLowerCase())
+      ? 'ours' : 'gone';
   }
-
-  try {
-    const commandLine = fs.readFileSync(`/proc/${pid}/cmdline`, 'utf8').split('\0');
-    return commandLine.includes(exe);
-  } catch (error) {
-    return false;
-  }
+  return commandLine.includes(exe) && commandLine.includes(marker) ? 'ours' : 'gone';
 }
 
-async function waitForPidExit(pid, exe, timeoutMs) {
+// Resolves true once the process of `entry` is no longer ours.
+async function waitForEntryExit(entry, timeoutMs) {
   const deadline = Date.now() + timeoutMs;
   while (Date.now() < deadline) {
-    if (!(await isProcessRunning(pid, exe))) {
+    if ((await identifyProcess(entry)) === 'gone') {
       return true;
     }
     await delay(250);
@@ -363,42 +415,62 @@ async function waitForPidExit(pid, exe, timeoutMs) {
   return false;
 }
 
-function killPid(pid) {
+function killPid(pid, signal) {
   try {
-    process.kill(pid);
+    process.kill(pid, signal);
   } catch (error) {
     // Already gone
   }
 }
 
+// Stop one leftover server. Returns false if it could not be confirmed as
+// stopped, in which case its entry has to stay in the run state.
+async function stopLeftover(label, entry, gracefulStop) {
+  const identity = await identifyProcess(entry);
+  if (identity === 'gone') {
+    return true;
+  }
+  if (identity === 'unknown') {
+    console.error(`Cannot verify leftover ${label} server (pid ${entry.pid}); leaving it alone`);
+    return false;
+  }
+
+  console.log(`Stopping leftover ${label} server (pid ${entry.pid})`);
+  if (gracefulStop) {
+    try {
+      await gracefulStop(entry);
+      if (await waitForEntryExit(entry, MYSQL_SHUTDOWN_TIMEOUT_MS)) {
+        return true;
+      }
+    } catch (error) {
+      console.error(`Graceful shutdown of leftover ${label} failed: ${error.message}`);
+    }
+  }
+  killPid(entry.pid);
+  if (await waitForEntryExit(entry, PROCESS_KILL_TIMEOUT_MS)) {
+    return true;
+  }
+  killPid(entry.pid, 'SIGKILL');
+  return waitForEntryExit(entry, PROCESS_KILL_TIMEOUT_MS);
+}
+
 async function cleanupStaleProcesses() {
   const state = readRunState();
+  const unresolved = {};
 
   const stalePhp = state.php;
   if (stalePhp && !(phpProcess && phpProcess.pid === stalePhp.pid) &&
-      await isProcessRunning(stalePhp.pid, stalePhp.exe)) {
-    console.log(`Stopping leftover PHP server (pid ${stalePhp.pid})`);
-    killPid(stalePhp.pid);
-    await waitForPidExit(stalePhp.pid, stalePhp.exe, 5000);
+      !(await stopLeftover('PHP', stalePhp))) {
+    unresolved.php = stalePhp;
   }
 
   const staleMysql = state.mysql;
   if (staleMysql && !(mysqlProcess && mysqlProcess.pid === staleMysql.pid) &&
-      await isProcessRunning(staleMysql.pid, staleMysql.exe)) {
-    console.log(`Stopping leftover MySQL server (pid ${staleMysql.pid})`);
-    let exited = false;
-    try {
-      await mysqlAdminShutdown(staleMysql.port);
-      exited = await waitForPidExit(staleMysql.pid, staleMysql.exe, MYSQL_SHUTDOWN_TIMEOUT_MS);
-    } catch (error) {
-      console.error(`Graceful shutdown of leftover MySQL failed: ${error.message}`);
-    }
-    if (!exited) {
-      killPid(staleMysql.pid);
-      await waitForPidExit(staleMysql.pid, staleMysql.exe, 5000);
-    }
+      !(await stopLeftover('MySQL', staleMysql, entry => mysqlAdminShutdown(entry.port)))) {
+    unresolved.mysql = staleMysql;
   }
 
+  unresolvedRunState = unresolved;
   writeRunState();
 }
 
@@ -425,6 +497,9 @@ function validateConfig(config) {
 
   if (!IDENTIFIER_RE.test(result.dbName)) {
     throw new Error('שם מסד הנתונים יכול להכיל רק אותיות לטיניות, ספרות וקו תחתון');
+  }
+  if (RESERVED_DB_NAMES.includes(result.dbName.toLowerCase())) {
+    throw new Error(`השם ${result.dbName} שמור לשימוש שרת מסד הנתונים. יש לבחור שם אחר`);
   }
   if (!IDENTIFIER_RE.test(result.dbUser)) {
     throw new Error('שם המשתמש למסד הנתונים יכול להכיל רק אותיות לטיניות, ספרות וקו תחתון');
@@ -950,7 +1025,8 @@ async function stopMysql() {
     console.log('MySQL shut down gracefully');
   } catch (error) {
     console.error(`MySQL graceful shutdown failed, force killing: ${error.message}`);
-    child.kill();
+    // Throws if the process survives; the handle and run state are then kept
+    await terminate(child);
   }
 
   if (mysqlProcess === child) {
@@ -970,15 +1046,17 @@ async function stopServers() {
 
   const wasRunning = phpProcess !== null || mysqlProcess !== null;
 
-  if (phpProcess) {
-    phpProcess.kill();
-    phpProcess = null;
-    phpPort = null;
-  }
-
-  await stopMysql();
-  if (wasRunning) {
-    writeRunState();
+  try {
+    if (phpProcess) {
+      await terminate(phpProcess);
+      phpProcess = null;
+      phpPort = null;
+    }
+    await stopMysql();
+  } finally {
+    if (wasRunning) {
+      writeRunState();
+    }
   }
   return true;
 }

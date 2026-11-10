@@ -154,6 +154,13 @@ describe('Hamichlol Offline Tests', function() {
       expect(() => validateConfig({ ...validConfig, dbName: 'wiki`; DROP DATABASE x; --' })).to.throw();
     });
 
+    it('should reject the database server\'s own schema names', function() {
+      for (const dbName of ['mysql', 'MySQL', 'information_schema', 'performance_schema', 'sys']) {
+        expect(() => validateConfig({ ...validConfig, dbName }), dbName).to.throw();
+      }
+      expect(validateConfig({ ...validConfig, dbName: 'mysql_wiki' }).dbName).to.equal('mysql_wiki');
+    });
+
     it('should reject database users that are not plain identifiers', function() {
       expect(() => validateConfig({ ...validConfig, dbUser: "user'@'%" })).to.throw();
     });
@@ -321,12 +328,13 @@ describe('Real mode with fake servers', function() {
 
   it('should stop a MariaDB left running by a crashed previous run', async function() {
     const exe = path.join(getPaths().mariadbDir, 'bin', 'mariadbd.exe');
-    leftover = spawn(exe, ['--no-defaults', '--port=0'], { stdio: 'ignore' });
+    const marker = `--datadir=${getPaths().dbDataDir}`;
+    leftover = spawn(exe, ['--no-defaults', marker, '--port=0'], { stdio: 'ignore' });
     await new Promise(resolve => setTimeout(resolve, 300));
     expect(isAlive(leftover.pid)).to.be.true;
 
     fs.writeFileSync(getPaths().runStateFile, JSON.stringify({
-      mysql: { pid: leftover.pid, port: 1, exe }
+      mysql: { pid: leftover.pid, port: 1, exe, marker }
     }));
 
     const ports = await startServers();
@@ -350,12 +358,57 @@ describe('Real mode with fake servers', function() {
     const exe = path.join(getPaths().mariadbDir, 'bin', 'mariadbd.exe');
     // This test process is alive but is not mariadbd, so it must be left alone
     fs.writeFileSync(getPaths().runStateFile, JSON.stringify({
-      mysql: { pid: process.pid, port: 1, exe }
+      mysql: { pid: process.pid, port: 1, exe, marker: `--datadir=${getPaths().dbDataDir}` }
     }));
 
     await startServers();
     expect(isAlive(process.pid)).to.be.true;
     await stopServers();
+  });
+
+  it('should never kill another server that runs the same program with other data', async function() {
+    const exe = path.join(getPaths().mariadbDir, 'bin', 'mariadbd.exe');
+    // E.g. the computer's own database service, which got the saved PID after a reboot
+    const other = spawn(exe, ['--no-defaults', '--datadir=/var/lib/mysql', '--port=0'], { stdio: 'ignore' });
+    try {
+      await new Promise(resolve => setTimeout(resolve, 300));
+      fs.writeFileSync(getPaths().runStateFile, JSON.stringify({
+        mysql: { pid: other.pid, port: 1, exe, marker: `--datadir=${getPaths().dbDataDir}` }
+      }));
+
+      await startServers();
+      await new Promise(resolve => setTimeout(resolve, 200));
+      expect(isAlive(other.pid)).to.be.true;
+      await stopServers();
+    } finally {
+      other.kill();
+    }
+  });
+
+  it('should ignore saved entries that do not say which process was ours', async function() {
+    const exe = path.join(getPaths().mariadbDir, 'bin', 'mariadbd.exe');
+    const other = spawn(exe, ['--no-defaults', `--datadir=${getPaths().dbDataDir}`, '--port=0'], { stdio: 'ignore' });
+    try {
+      await new Promise(resolve => setTimeout(resolve, 300));
+      fs.writeFileSync(getPaths().runStateFile, JSON.stringify({ mysql: { pid: other.pid, port: 1, exe } }));
+
+      await startServers();
+      expect(isAlive(other.pid)).to.be.true;
+      await stopServers();
+    } finally {
+      other.kill();
+    }
+  });
+
+  it('should wait for the servers to exit before reporting them stopped', async function() {
+    await startServers();
+    const state = JSON.parse(fs.readFileSync(getPaths().runStateFile, 'utf8'));
+    expect(state.mysql.marker).to.equal(`--datadir=${getPaths().dbDataDir}`);
+    expect(state.php.marker).to.equal(getPaths().mediaWikiPath);
+
+    await stopServers();
+    expect(isAlive(state.mysql.pid)).to.be.false;
+    expect(isAlive(state.php.pid)).to.be.false;
   });
 });
 
@@ -471,12 +524,13 @@ describe('Installed software detection', function() {
     expect(result.reason).to.include(systemTools.MIN_VERSIONS.mysql);
   });
 
-  it('should only pass --mysqlx=OFF to servers that know the option', function() {
+  it('should disable the MySQL X port in a way every MySQL version accepts', function() {
     const { dbServerArgs } = require('../src/server-manager');
     const args = (flavor, version) => dbServerArgs({ flavor, version }, 3306);
-    expect(args('mysql', '8.0.36')).to.include('--mysqlx=OFF');
-    expect(args('mysql', '5.7.44')).to.not.include('--mysqlx=OFF');
-    expect(args('mariadb', '11.4.2')).to.not.include('--mysqlx=OFF');
+    // "loose" lets a MySQL without the X plugin ignore the option
+    expect(args('mysql', '8.0.36')).to.include('--loose-mysqlx=OFF');
+    expect(args('mysql', '5.7.44')).to.include('--loose-mysqlx=OFF');
+    expect(args('mariadb', '11.4.2').join(' ')).to.not.include('mysqlx');
   });
 
   it('should accept a complete MediaWiki and reject old or incomplete ones', function() {
