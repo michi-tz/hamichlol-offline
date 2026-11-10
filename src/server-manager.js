@@ -29,6 +29,8 @@ const PROCESS_KILL_TIMEOUT_MS = 5000;
 const RESERVED_DB_NAMES = ['mysql', 'information_schema', 'performance_schema', 'sys'];
 
 const IDENTIFIER_RE = /^[A-Za-z0-9_]{1,64}$/;
+// MySQL allows at most 32 characters in a user name (MariaDB allows more)
+const DB_USER_RE = /^[A-Za-z0-9_]{1,32}$/;
 const MIN_ADMIN_PASSWORD_LENGTH = 10;
 
 const PHP_EXTENSIONS = ['mysqli', 'intl', 'mbstring', 'fileinfo', 'openssl', 'gd'];
@@ -540,8 +542,8 @@ function validateConfig(config) {
   if (RESERVED_DB_NAMES.includes(result.dbName.toLowerCase())) {
     throw new Error(`השם ${result.dbName} שמור לשימוש שרת מסד הנתונים. יש לבחור שם אחר`);
   }
-  if (!IDENTIFIER_RE.test(result.dbUser)) {
-    throw new Error('שם המשתמש למסד הנתונים יכול להכיל רק אותיות לטיניות, ספרות וקו תחתון');
+  if (!DB_USER_RE.test(result.dbUser)) {
+    throw new Error('שם המשתמש למסד הנתונים יכול להכיל רק אותיות לטיניות, ספרות וקו תחתון, עד 32 תווים');
   }
   if (!result.wikiName || !result.adminUser) {
     throw new Error('יש למלא שם אתר ושם משתמש מנהל');

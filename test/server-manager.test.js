@@ -165,6 +165,12 @@ describe('Hamichlol Offline Tests', function() {
       expect(() => validateConfig({ ...validConfig, dbUser: "user'@'%" })).to.throw();
     });
 
+    it('should limit database user names to the 32 characters MySQL accepts', function() {
+      expect(validateConfig({ ...validConfig, dbUser: 'u'.repeat(32) }).dbUser).to.have.lengthOf(32);
+      expect(() => validateConfig({ ...validConfig, dbUser: 'u'.repeat(33) })).to.throw();
+      expect(validateConfig({ ...validConfig, dbName: 'd'.repeat(64) }).dbName).to.have.lengthOf(64);
+    });
+
     it('should reject missing fields', function() {
       expect(() => validateConfig({ ...validConfig, dbPassword: '' })).to.throw();
       expect(() => validateConfig({ ...validConfig, wikiName: undefined })).to.throw();
