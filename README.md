@@ -21,7 +21,7 @@
 1. התקן את Node.js
 2. שבט (Clone) את המאגר:
 ```bash
-git clone https://github.com/yourusername/hamichlol-offline.git
+git clone https://github.com/michi-tz/hamichlol-offline.git
 cd hamichlol-offline
 ```
 
@@ -56,8 +56,7 @@ hamichlol-offline/
 │   ├── server/             # קבצי שרת (PHP, MySQL)
 │   └── mediawiki/          # קבצי MediaWiki
 ├── scripts/                # סקריפטים לאוטומציה
-├── package.json            # הגדרות פרויקט ותלויות
-└── forge.config.js         # תצורת Electron Forge
+└── package.json            # הגדרות פרויקט, תלויות ותצורת electron-builder
 ```
 
 ## רישיון

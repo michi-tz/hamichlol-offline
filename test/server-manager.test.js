@@ -1,11 +1,13 @@
 const { describe, it, before, after } = require('mocha');
 const { expect } = require('chai');
-const { downloadServers, installMediaWiki, startServers, stopServers } = require('../src/server-manager');
 const fs = require('fs');
 const path = require('path');
 
-// Set dev mode for testing
+// Set dev mode for testing (must happen before server-manager is loaded,
+// since it reads the flag at require time)
 process.env.DEV_MODE = 'true';
+
+const { downloadServers, installMediaWiki, startServers, stopServers } = require('../src/server-manager');
 
 // Test paths
 const resourcesPath = path.join(__dirname, '..', 'resources');

@@ -4,10 +4,11 @@ const { exec, spawn } = require('child_process');
 const download = require('download');
 const admZip = require('adm-zip');
 const portfinder = require('portfinder');
-const cmd = require('node-cmd');
 
-// Paths
-const resourcesPath = path.join(process.resourcesPath || path.join(__dirname, '..'), 'resources');
+// Paths: next to the packaged app's resources, or the project root when running
+// from source (`electron .` sets process.resourcesPath to Electron's own folder)
+const isPackagedApp = Boolean(process.versions.electron) && !process.defaultApp;
+const resourcesPath = path.join(isPackagedApp ? process.resourcesPath : path.join(__dirname, '..'), 'resources');
 const serverPath = path.join(resourcesPath, 'server');
 const mediaWikiPath = path.join(resourcesPath, 'mediawiki');
 
@@ -119,7 +120,7 @@ async function downloadServers() {
       
       // Initialize MySQL with mysql_install_db
       await new Promise((resolve, reject) => {
-        const mysqlInstall = exec(
+        exec(
           `"${path.join(serverPath, 'mysql', 'bin', 'mysql_install_db.exe')}" --datadir="${dataDir}"`,
           (error, stdout, stderr) => {
             if (error) {
@@ -157,7 +158,7 @@ async function downloadServers() {
     
     // Cleanup
     fs.unlinkSync(mediawikiZipPath);
-    fs.rmdirSync(extractedDir, { recursive: true });
+    fs.rmSync(extractedDir, { recursive: true });
   }
 
   console.log('All servers downloaded successfully');
@@ -223,6 +224,10 @@ async function startServers() {
 
   // In dev mode, simulate server start
   if (DEV_MODE) {
+    if (phpProcess) {
+      return { phpPort, mysqlPort };
+    }
+
     console.log('DEV MODE: Simulating server start');
     console.log(`Mock PHP server started at http://localhost:${phpPort}`);
     console.log(`Mock MySQL server started at port ${mysqlPort}`);
@@ -230,7 +235,7 @@ async function startServers() {
     // Create a simple HTTP server for testing
     const http = require('http');
     const server = http.createServer((req, res) => {
-      res.writeHead(200, {'Content-Type': 'text/html'});
+      res.writeHead(200, {'Content-Type': 'text/html; charset=utf-8'});
       res.end(`
         <html dir="rtl">
           <head><title>המכלול - אתר בדיקה</title></head>

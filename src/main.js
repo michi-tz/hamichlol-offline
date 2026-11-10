@@ -1,6 +1,5 @@
 const { app, BrowserWindow, ipcMain } = require('electron');
 const path = require('path');
-const fs = require('fs');
 const { downloadServers, installMediaWiki, startServers, stopServers } = require('./server-manager');
 
 let mainWindow;
