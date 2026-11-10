@@ -358,3 +358,307 @@ describe('Real mode with fake servers', function() {
     await stopServers();
   });
 });
+
+// Detection of software that is already installed, using small shell scripts
+// in place of the real programs.
+describe('Installed software detection', function() {
+  const systemTools = require('../src/system-tools');
+  let tempDir;
+
+  function writeScript(name, source) {
+    const file = path.join(tempDir, name);
+    fs.mkdirSync(path.dirname(file), { recursive: true });
+    fs.writeFileSync(file, `#!/bin/sh\n${source}\n`);
+    fs.chmodSync(file, 0o755);
+    return file;
+  }
+
+  function fakePhp(name, version, extensions, sapi = 'cli') {
+    const info = JSON.stringify({ version, sapi, extensions });
+    return writeScript(name, `echo '${info}'`);
+  }
+
+  function fakeMediaWiki(name, version) {
+    const dir = path.join(tempDir, name);
+    fs.mkdirSync(path.join(dir, 'includes'), { recursive: true });
+    fs.mkdirSync(path.join(dir, 'maintenance'), { recursive: true });
+    fs.mkdirSync(path.join(dir, 'vendor'), { recursive: true });
+    fs.writeFileSync(path.join(dir, 'index.php'), '');
+    fs.writeFileSync(path.join(dir, 'maintenance', 'install.php'), '');
+    fs.writeFileSync(path.join(dir, 'includes', 'Defines.php'), `<?php\ndefine( 'MW_VERSION', '${version}' );\n`);
+    return dir;
+  }
+
+  before(function() {
+    if (process.platform === 'win32') {
+      this.skip();
+    }
+    tempDir = fs.mkdtempSync(path.join(os.tmpdir(), 'hamichlol-system-'));
+  });
+
+  after(function() {
+    if (tempDir) {
+      fs.rmSync(tempDir, { recursive: true, force: true });
+    }
+  });
+
+  it('should compare versions numerically', function() {
+    expect(systemTools.compareVersions('8.10.0', '8.9.9')).to.be.above(0);
+    expect(systemTools.compareVersions('8.1.0', '8.1.0')).to.equal(0);
+    expect(systemTools.compareVersions('7.4.33', '8.1.0')).to.be.below(0);
+  });
+
+  it('should recognise MariaDB and MySQL version output', function() {
+    expect(systemTools.parseDbServerVersion(
+      'mariadbd  Ver 10.11.14-MariaDB-0ubuntu0.24.04.1 for debian-linux-gnu on x86_64 (Ubuntu 24.04)'
+    )).to.deep.equal({ version: '10.11.14', flavor: 'mariadb' });
+    expect(systemTools.parseDbServerVersion(
+      '/usr/sbin/mysqld  Ver 8.0.36 for Linux on x86_64 (MySQL Community Server - GPL)'
+    )).to.deep.equal({ version: '8.0.36', flavor: 'mysql' });
+    expect(systemTools.parseDbServerVersion('something else')).to.be.null;
+  });
+
+  it('should accept a PHP with a new enough version and all extensions', function() {
+    const exe = fakePhp('php-good', '8.3.6-ubuntu', systemTools.REQUIRED_PHP_EXTENSIONS);
+    expect(systemTools.findSystemPhp([exe])).to.deep.equal({ exe, version: '8.3.6', usable: true, reason: null });
+  });
+
+  it('should reject a PHP that is too old, and say why', function() {
+    const result = systemTools.findSystemPhp([fakePhp('php-old', '7.4.33', systemTools.REQUIRED_PHP_EXTENSIONS)]);
+    expect(result.usable).to.be.false;
+    expect(result.reason).to.include(systemTools.MIN_VERSIONS.php);
+  });
+
+  it('should reject a PHP with missing extensions, and name them', function() {
+    const extensions = systemTools.REQUIRED_PHP_EXTENSIONS.filter(name => name !== 'intl' && name !== 'mysqli');
+    const result = systemTools.findSystemPhp([fakePhp('php-bare', '8.3.6', extensions)]);
+    expect(result.usable).to.be.false;
+    expect(result.reason).to.include('mysqli').and.to.include('intl');
+  });
+
+  it('should skip unusable candidates and files that are not PHP', function() {
+    const broken = writeScript('php-broken', 'exit 1');
+    const old = fakePhp('php-old2', '8.0.30', systemTools.REQUIRED_PHP_EXTENSIONS);
+    const good = fakePhp('php-good2', '8.4.1', systemTools.REQUIRED_PHP_EXTENSIONS);
+    expect(systemTools.findSystemPhp([broken, old, good]).exe).to.equal(good);
+    expect(systemTools.findSystemPhp([]) ).to.be.null;
+  });
+
+  it('should accept a MariaDB server together with its install tool', function() {
+    const exe = writeScript('maria/sbin/mariadbd', "echo 'mariadbd  Ver 11.4.2-MariaDB for Linux on x86_64'");
+    const installDb = writeScript('maria/bin/mariadb-install-db', 'exit 0');
+    const result = systemTools.findSystemDatabase([exe]);
+    expect(result).to.include({ exe, version: '11.4.2', flavor: 'mariadb', usable: true });
+    expect(fs.realpathSync(result.installDb)).to.equal(fs.realpathSync(installDb));
+  });
+
+  it('should reject a database server that is too old', function() {
+    const exe = writeScript('oldmaria/bin/mariadbd', "echo 'mysqld  Ver 10.1.48-MariaDB for Linux'");
+    const result = systemTools.findSystemDatabase([exe]);
+    expect(result.usable).to.be.false;
+    expect(result.reason).to.include(systemTools.MIN_VERSIONS.mariadb);
+  });
+
+  it('should accept MySQL, which needs no separate install tool', function() {
+    const exe = writeScript('mysql/bin/mysqld', "echo 'mysqld  Ver 8.4.0 for Linux on x86_64 (MySQL Community Server - GPL)'");
+    expect(systemTools.findSystemDatabase([exe])).to.include({ version: '8.4.0', flavor: 'mysql', usable: true });
+  });
+
+  it('should accept a complete MediaWiki and reject old or incomplete ones', function() {
+    const good = fakeMediaWiki('mw-good', '1.39.7');
+    const old = fakeMediaWiki('mw-old', '1.35.14');
+    const incomplete = fakeMediaWiki('mw-incomplete', '1.43.0');
+    fs.rmSync(path.join(incomplete, 'vendor'), { recursive: true });
+
+    expect(systemTools.findSystemMediaWiki([good])).to.deep.equal({ dir: good, version: '1.39.7', usable: true, reason: null });
+    expect(systemTools.findSystemMediaWiki([old]).usable).to.be.false;
+    expect(systemTools.findSystemMediaWiki([incomplete]).usable).to.be.false;
+    expect(systemTools.findSystemMediaWiki([path.join(tempDir, 'missing')]).usable).to.be.false;
+    expect(systemTools.findSystemMediaWiki([old, good]).dir).to.equal(good);
+  });
+
+  it('should be switched off by HAMICHLOL_USE_SYSTEM=false', function() {
+    expect(systemTools.isEnabled()).to.be.true;
+    process.env.HAMICHLOL_USE_SYSTEM = 'false';
+    try {
+      expect(systemTools.isEnabled()).to.be.false;
+    } finally {
+      delete process.env.HAMICHLOL_USE_SYSTEM;
+    }
+  });
+});
+
+// Server manager behaviour when installed software is used. The programs are
+// located through the HAMICHLOL_* variables, so nothing real is needed.
+describe('Real mode with installed software', function() {
+  const systemTools = require('../src/system-tools');
+  this.timeout(30000);
+
+  let tempDir;
+  let dataDir;
+  const savedEnv = {};
+
+  function writeNodeScript(file, source) {
+    fs.mkdirSync(path.dirname(file), { recursive: true });
+    fs.writeFileSync(file, `#!/usr/bin/env node\n${source}\n`);
+    fs.chmodSync(file, 0o755);
+    return file;
+  }
+
+  before(function() {
+    if (process.platform !== 'linux') {
+      this.skip();
+    }
+    tempDir = fs.mkdtempSync(path.join(os.tmpdir(), 'hamichlol-installed-'));
+    dataDir = path.join(tempDir, 'data');
+
+    // Answers the inspection call, runs install.php and serves pages
+    const php = writeNodeScript(path.join(tempDir, 'bin', 'php'), `
+      const args = process.argv.slice(2);
+      if (args[0] === '-r') {
+        console.log(JSON.stringify({ version: '8.3.6', sapi: 'cli', extensions: ${JSON.stringify(systemTools.REQUIRED_PHP_EXTENSIONS)} }));
+      } else if (args.includes('-c')) {
+        process.exit(9); // an installed PHP must keep its own php.ini
+      } else if (args.includes('-S')) {
+        const [host, port] = args[args.indexOf('-S') + 1].split(':');
+        require('http').createServer((q, r) => r.end('db=' + process.env.HAMICHLOL_DB_PORT)).listen(+port, host);
+      }
+    `);
+    const mysqld = writeNodeScript(path.join(tempDir, 'sbin', 'mariadbd'), `
+      const args = process.argv.slice(2);
+      if (args.includes('--version')) {
+        console.log('mariadbd  Ver 10.11.14-MariaDB for Linux on x86_64');
+      } else {
+        require('fs').writeFileSync(${JSON.stringify(path.join(tempDir, 'mariadbd-args.json'))}, JSON.stringify(args));
+        const port = +args.find(a => a.startsWith('--port=')).split('=')[1];
+        require('net').createServer(s => s.end()).listen(port, '127.0.0.1');
+      }
+    `);
+    writeNodeScript(path.join(tempDir, 'bin', 'mariadb-install-db'), `
+      const dir = process.argv.find(a => a.startsWith('--datadir=')).split('=')[1];
+      require('fs').mkdirSync(require('path').join(dir, 'mysql'), { recursive: true });
+    `);
+
+    // An existing MediaWiki with its own wiki, which must not be carried over
+    const mediawiki = path.join(tempDir, 'mediawiki');
+    for (const dir of ['includes', 'maintenance', 'vendor', 'images', 'cache']) {
+      fs.mkdirSync(path.join(mediawiki, dir), { recursive: true });
+    }
+    fs.writeFileSync(path.join(mediawiki, 'index.php'), 'existing');
+    fs.writeFileSync(path.join(mediawiki, 'maintenance', 'install.php'), '');
+    fs.writeFileSync(path.join(mediawiki, 'includes', 'Defines.php'), "<?php\ndefine( 'MW_VERSION', '1.39.7' );\n");
+    fs.writeFileSync(path.join(mediawiki, 'LocalSettings.php'), 'secret');
+    fs.writeFileSync(path.join(mediawiki, 'images', 'upload.png'), 'x');
+    fs.symlinkSync(path.join(mediawiki, 'includes'), path.join(mediawiki, 'linked'));
+
+    for (const name of Object.values(systemTools.ENV)) {
+      savedEnv[name] = process.env[name];
+    }
+    process.env[systemTools.ENV.php] = php;
+    process.env[systemTools.ENV.dbServer] = mysqld;
+    process.env[systemTools.ENV.mediawiki] = mediawiki;
+    delete process.env[systemTools.ENV.enabled];
+    process.env.DEV_MODE = 'false';
+    systemTools.resetCache();
+    setDataPath(dataDir);
+  });
+
+  after(async function() {
+    if (!tempDir) {
+      return;
+    }
+    await stopServers();
+    for (const [name, value] of Object.entries(savedEnv)) {
+      if (value === undefined) {
+        delete process.env[name];
+      } else {
+        process.env[name] = value;
+      }
+    }
+    process.env.DEV_MODE = 'true';
+    systemTools.resetCache();
+    fs.rmSync(tempDir, { recursive: true, force: true });
+  });
+
+  it('should report the installed software before anything is set up', function() {
+    const status = getStatus();
+    expect(status.downloaded).to.be.false;
+    expect(status.tools.php).to.include({ source: 'system', version: '8.3.6', path: process.env[systemTools.ENV.php] });
+    expect(status.tools.database).to.include({ source: 'system', version: '10.11.14', flavor: 'mariadb' });
+    expect(status.tools.mediawiki).to.include({ source: 'system', version: '1.39.7' });
+  });
+
+  it('should set up without downloading PHP or the database server', async function() {
+    await downloadServers();
+
+    const paths = getPaths();
+    expect(fs.existsSync(paths.phpDir)).to.be.false;
+    expect(fs.existsSync(paths.mariadbDir)).to.be.false;
+    expect(fs.existsSync(path.join(paths.dbDataDir, 'mysql'))).to.be.true;
+
+    const status = getStatus();
+    expect(status.downloaded).to.be.true;
+    expect(status.tools.mediawiki).to.include({ source: 'installed', version: '1.39.7' });
+  });
+
+  it('should copy MediaWiki without the existing wiki and without touching it', function() {
+    const { mediaWikiPath } = getPaths();
+    const source = process.env[systemTools.ENV.mediawiki];
+
+    expect(fs.readFileSync(path.join(mediaWikiPath, 'index.php'), 'utf8')).to.equal('existing');
+    expect(fs.existsSync(path.join(mediaWikiPath, 'LocalSettings.php'))).to.be.false;
+    expect(fs.readdirSync(path.join(mediaWikiPath, 'images'))).to.deep.equal([]);
+    // Symlinks are copied as real folders, so the copy does not depend on the original
+    expect(fs.lstatSync(path.join(mediaWikiPath, 'linked')).isSymbolicLink()).to.be.false;
+    expect(fs.existsSync(path.join(mediaWikiPath, 'linked', 'Defines.php'))).to.be.true;
+
+    expect(fs.readFileSync(path.join(source, 'LocalSettings.php'), 'utf8')).to.equal('secret');
+    expect(fs.existsSync(path.join(source, 'images', 'upload.png'))).to.be.true;
+  });
+
+  it('should run the installed servers with their own data, port and socket', async function() {
+    fs.writeFileSync(getPaths().localSettings, '');
+    const ports = await startServers();
+
+    const response = await fetch(`http://127.0.0.1:${ports.phpPort}/`);
+    expect(await response.text()).to.equal(`db=${ports.mysqlPort}`);
+
+    const args = JSON.parse(fs.readFileSync(path.join(tempDir, 'mariadbd-args.json'), 'utf8'));
+    expect(args[0]).to.equal('--no-defaults');
+    expect(args).to.include(`--datadir=${getPaths().dbDataDir}`);
+    expect(args).to.include(`--port=${ports.mysqlPort}`);
+    expect(args).to.include('--bind-address=127.0.0.1');
+    expect(args.some(arg => arg.startsWith('--socket='))).to.be.true;
+
+    const state = JSON.parse(fs.readFileSync(getPaths().runStateFile, 'utf8'));
+    expect(state.mysql.exe).to.equal(process.env[systemTools.ENV.dbServer]);
+    expect(state.php.exe).to.equal(process.env[systemTools.ENV.php]);
+
+    await stopServers();
+    expect(getStatus().running).to.be.false;
+  });
+
+  it('should ignore installed software when it is switched off', function() {
+    process.env[systemTools.ENV.enabled] = 'false';
+    try {
+      const status = getStatus();
+      expect(status.tools.php.source).to.be.null;
+      expect(status.tools.database.source).to.be.null;
+      expect(status.downloaded).to.be.false;
+    } finally {
+      delete process.env[systemTools.ENV.enabled];
+    }
+  });
+
+  it('should explain what is missing where nothing can be downloaded', async function() {
+    process.env[systemTools.ENV.enabled] = 'false';
+    try {
+      await downloadServers();
+      expect.fail('should have thrown');
+    } catch (error) {
+      expect(error.message).to.include('PHP').and.to.include('Windows');
+    } finally {
+      delete process.env[systemTools.ENV.enabled];
+    }
+  });
+});

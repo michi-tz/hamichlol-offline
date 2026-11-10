@@ -74,6 +74,23 @@
       background: #f0f0f0;
       text-align: center;
     }
+    .tools-list {
+      padding: 0;
+      list-style: none;
+    }
+    .tools-list li {
+      margin-bottom: 6px;
+    }
+    .tools-list .tool-path {
+      color: #666;
+      font-size: 13px;
+      direction: ltr;
+      unicode-bidi: embed;
+    }
+    .tools-list .tool-problem {
+      color: #b00020;
+      font-size: 13px;
+    }
     .browser-frame {
       width: 100%;
       height: 500px;
@@ -92,8 +109,9 @@
     
     <div class="step" id="step1">
       <h3>שלב 1: התקנת שרתים</h3>
-      <p>יש להוריד את שרת PHP, MySQL ומדיה ויקי למחשב שלך</p>
-      <button id="downloadBtn">הורד והתקן שרתים</button>
+      <p>נדרשים PHP, שרת מסד נתונים (MariaDB או MySQL) ומדיה ויקי. תוכנות שכבר מותקנות במחשב ישמשו כמות שהן, והשאר יורדו.</p>
+      <ul id="toolsList" class="tools-list"></ul>
+      <button id="downloadBtn">התקן שרתים</button>
     </div>
     
     <div class="step" id="step2">
@@ -152,6 +170,7 @@
     const stopServersBtn = document.getElementById('stopServersBtn');
     const statusEl = document.getElementById('status');
     const wikiBrowser = document.getElementById('wikiBrowser');
+    const toolsList = document.getElementById('toolsList');
 
     function setStatus(message) {
       statusEl.textContent = `סטטוס: ${message}`;
@@ -167,10 +186,59 @@
       wikiBrowser.src = 'about:blank';
     }
 
+    // One line per component: taken from the computer, already downloaded, or still to download.
+    function describeTool(name, tool, downloadVersion, canDownload) {
+      const item = document.createElement('li');
+      const title = document.createElement('strong');
+      title.textContent = `${name}: `;
+      item.appendChild(title);
+
+      let text;
+      if (tool.source === 'system') {
+        text = `גרסה ${tool.version} שמותקנת במחשב `;
+      } else if (tool.source === 'bundled' || tool.source === 'installed') {
+        text = `גרסה ${tool.version || downloadVersion} כבר הורדה `;
+      } else if (canDownload) {
+        text = `תורד גרסה ${downloadVersion} `;
+      } else {
+        text = 'לא נמצא במחשב. יש להתקין אותו ואז ללחוץ על הכפתור ';
+      }
+      item.appendChild(document.createTextNode(text));
+
+      if (tool.source && tool.path) {
+        const pathEl = document.createElement('span');
+        pathEl.className = 'tool-path';
+        pathEl.textContent = tool.path;
+        item.appendChild(pathEl);
+      }
+      if (!tool.source && tool.problem) {
+        const problemEl = document.createElement('div');
+        problemEl.className = 'tool-problem';
+        problemEl.textContent = `נמצאה התקנה שאינה מתאימה: ${tool.problem}`;
+        item.appendChild(problemEl);
+      }
+      return item;
+    }
+
+    function showTools(status) {
+      const { tools, versions, canDownloadServers } = status;
+      const databaseName = tools.database.flavor === 'mysql' ? 'MySQL' : 'MariaDB';
+      const mediawiki = tools.mediawiki.source === 'download'
+        ? { source: null }
+        : tools.mediawiki;
+      toolsList.replaceChildren(
+        describeTool('PHP', tools.php, versions.php, canDownloadServers),
+        describeTool(databaseName, tools.database, versions.mariadb, canDownloadServers),
+        // MediaWiki's download is plain PHP files, so it works on every system
+        describeTool('MediaWiki', mediawiki, versions.mediawiki, true)
+      );
+    }
+
     // Show only the step that matches what has already been done, so the app
     // resumes where it left off after a restart.
     async function refreshView() {
       const status = await ipcRenderer.invoke('get-status');
+      showTools(status);
 
       step1.style.display = status.downloaded ? 'none' : 'block';
       step2.style.display = status.downloaded && !status.installed ? 'block' : 'none';
@@ -189,7 +257,7 @@
         if (!status.downloaded) {
           setStatus('ממתין להתקנה...');
         } else if (!status.installed) {
-          setStatus('השרתים הורדו. יש להגדיר את MediaWiki');
+          setStatus('השרתים מוכנים. יש להגדיר את MediaWiki');
         } else {
           setStatus('המערכת מותקנת. אפשר להפעיל את השרתים');
         }
@@ -206,14 +274,14 @@
     // Step 1: Download servers
     downloadBtn.addEventListener('click', async () => {
       downloadBtn.disabled = true;
-      setStatus('מוריד שרתים...');
+      setStatus('מכין שרתים...');
 
       try {
         const result = await ipcRenderer.invoke('download-servers');
         if (result.success) {
           await refreshView();
         } else {
-          setStatus(`שגיאה בהורדת השרתים - ${result.error}`);
+          setStatus(`שגיאה בהתקנת השרתים - ${result.error}`);
           downloadBtn.disabled = false;
         }
       } catch (error) {

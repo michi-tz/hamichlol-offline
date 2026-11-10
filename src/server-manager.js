@@ -1,4 +1,5 @@
 const fs = require('fs');
+const os = require('os');
 const net = require('net');
 const path = require('path');
 const { execFile, spawn } = require('child_process');
@@ -7,6 +8,7 @@ const AdmZip = require('adm-zip');
 const portfinder = require('portfinder');
 const mysql = require('mysql2/promise');
 const { DOWNLOADS } = require('./versions');
+const systemTools = require('./system-tools');
 
 // Network settings. Everything binds to the loopback interface only.
 const LOOPBACK_HOST = '127.0.0.1';
@@ -19,6 +21,7 @@ const DB_PORT_ENV = 'HAMICHLOL_DB_PORT';
 
 const SERVER_START_TIMEOUT_MS = 60000;
 const MYSQL_SHUTDOWN_TIMEOUT_MS = 15000;
+const MYSQL_CONNECT_TIMEOUT_MS = 5000;
 
 const IDENTIFIER_RE = /^[A-Za-z0-9_]{1,64}$/;
 const MIN_ADMIN_PASSWORD_LENGTH = 10;
@@ -28,9 +31,14 @@ const PHP_EXTENSIONS = ['mysqli', 'intl', 'mbstring', 'fileinfo', 'openssl', 'gd
 // MariaDB renamed its executables (mysqld -> mariadbd, ...). Accept both names.
 const MARIADB_BINARIES = {
   server: ['mariadbd.exe', 'mysqld.exe'],
-  admin: ['mariadb-admin.exe', 'mysqladmin.exe'],
   installDb: ['mariadb-install-db.exe', 'mysql_install_db.exe']
 };
+
+// Automatic downloads are Windows builds; elsewhere installed software is used.
+const CAN_DOWNLOAD_SERVERS = process.platform === 'win32';
+
+// Unix socket paths are limited to about 100 characters.
+const MAX_SOCKET_PATH_LENGTH = 100;
 
 // Writable directory that holds the downloaded servers, MediaWiki and the
 // database. The Electron main process points this at the user's data folder.
@@ -69,11 +77,127 @@ function getPaths() {
   };
 }
 
-// Path of a MariaDB executable, preferring whichever name exists on disk.
+// Path of a downloaded MariaDB executable, preferring whichever name exists on disk.
 function mariadbBinary(kind) {
   const binDir = path.join(getPaths().mariadbDir, 'bin');
   const candidates = MARIADB_BINARIES[kind].map(name => path.join(binDir, name));
   return candidates.find(candidate => fs.existsSync(candidate)) || candidates[0];
+}
+
+// Software installed on the computer is used unless disabled; dev mode only
+// ever works with its mock files.
+function useSystemTools() {
+  return !isDevMode() && systemTools.isEnabled();
+}
+
+// The PHP to run: the downloaded copy if there is one, otherwise a suitable PHP
+// that is already installed on the computer. `problem` says why an installed
+// PHP was found but cannot be used.
+function resolvePhp() {
+  const { phpExe, phpIni, phpDir } = getPaths();
+  if (fs.existsSync(phpExe) && fs.existsSync(phpIni)) {
+    return { source: 'bundled', exe: phpExe, ini: phpIni, cwd: phpDir, version: DOWNLOADS.php.version };
+  }
+  const found = useSystemTools() ? systemTools.findSystemPhp() : null;
+  if (found && found.usable) {
+    // No -c: an installed PHP keeps using its own php.ini
+    return { source: 'system', exe: found.exe, ini: null, cwd: undefined, version: found.version };
+  }
+  return { source: null, problem: found ? `${found.exe} (${found.version || '?'}): ${found.reason}` : null };
+}
+
+// The database server to run, chosen like PHP. Only the program is shared with
+// an existing installation: the app starts its own process with its own data.
+function resolveDatabase() {
+  const server = mariadbBinary('server');
+  if (fs.existsSync(server)) {
+    return {
+      source: 'bundled',
+      exe: server,
+      installDb: mariadbBinary('installDb'),
+      flavor: 'mariadb',
+      version: DOWNLOADS.mariadb.version
+    };
+  }
+  const found = useSystemTools() ? systemTools.findSystemDatabase() : null;
+  if (found && found.usable) {
+    return { source: 'system', exe: found.exe, installDb: found.installDb, flavor: found.flavor, version: found.version };
+  }
+  return { source: null, problem: found ? `${found.exe} (${found.version || '?'}): ${found.reason}` : null };
+}
+
+// Where MediaWiki's files come from: already in the data folder, a copy of an
+// installation found on the computer, or a download.
+function resolveMediaWiki() {
+  const { mediaWikiPath } = getPaths();
+  if (fs.existsSync(path.join(mediaWikiPath, 'index.php'))) {
+    return { source: 'installed', dir: mediaWikiPath, version: readMediaWikiVersion(mediaWikiPath) };
+  }
+  const found = useSystemTools() ? systemTools.findSystemMediaWiki() : null;
+  if (found && found.usable) {
+    return { source: 'system', dir: found.dir, version: found.version };
+  }
+  return { source: 'download', dir: null, version: DOWNLOADS.mediawiki.version };
+}
+
+function readMediaWikiVersion(dir) {
+  try {
+    const defines = fs.readFileSync(path.join(dir, 'includes', 'Defines.php'), 'utf8');
+    const match = /define\(\s*'MW_VERSION'\s*,\s*'([^']+)'/.exec(defines);
+    return match ? match[1] : null;
+  } catch (error) {
+    return null;
+  }
+}
+
+function requirePhp() {
+  const php = resolvePhp();
+  if (!php.source) {
+    throw new Error('PHP אינו מותקן');
+  }
+  return php;
+}
+
+function requireDatabase() {
+  const database = resolveDatabase();
+  if (!database.source) {
+    throw new Error('שרת מסד הנתונים אינו מותקן');
+  }
+  return database;
+}
+
+function phpArgs(php, args) {
+  return php.ini ? ['-c', php.ini, ...args] : args;
+}
+
+// A database server refuses to run as root unless told which user to run as.
+function runsAsRoot() {
+  return typeof process.getuid === 'function' && process.getuid() === 0;
+}
+
+// Options for a database server that shares the computer with other installations.
+function dbServerArgs(database, port) {
+  const { dataPath, dbDataDir } = getPaths();
+  // --no-defaults must come first; it ignores my.ini / my.cnf of other installations
+  const args = ['--no-defaults', `--datadir=${dbDataDir}`, `--port=${port}`, `--bind-address=${LOOPBACK_HOST}`];
+  if (process.platform === 'win32') {
+    args.push('--console');
+  } else {
+    // The default socket and PID file belong to the system-wide server
+    let socket = path.join(dataPath, 'mysql.sock');
+    if (socket.length > MAX_SOCKET_PATH_LENGTH) {
+      socket = path.join(os.tmpdir(), `hamichlol-mysql-${port}.sock`);
+    }
+    args.push(`--socket=${socket}`, `--pid-file=${path.join(dataPath, 'mysql.pid')}`);
+    if (runsAsRoot()) {
+      args.push('--user=root');
+    }
+  }
+  if (database.flavor === 'mysql') {
+    // MySQL 8 also listens on a second (X protocol) port unless disabled
+    args.push('--mysqlx=OFF');
+  }
+  return args;
 }
 
 // Read at call time (not at module load) so the flag can be set after require().
@@ -179,10 +303,10 @@ function writeRunState() {
   const { runStateFile } = getPaths();
   const state = {};
   if (mysqlProcess) {
-    state.mysql = { pid: mysqlProcess.pid, port: mysqlPort, exe: mariadbBinary('server') };
+    state.mysql = { pid: mysqlProcess.pid, port: mysqlPort, exe: mysqlProcess.spawnfile };
   }
   if (phpProcess) {
-    state.php = { pid: phpProcess.pid, port: phpPort, exe: getPaths().phpExe };
+    state.php = { pid: phpProcess.pid, port: phpPort, exe: phpProcess.spawnfile };
   }
   if (Object.keys(state).length === 0) {
     fs.rmSync(runStateFile, { force: true });
@@ -379,12 +503,14 @@ function isDatabaseInitialized() {
 // What has already been done, so the UI can resume after the app restarts.
 function getStatus() {
   const paths = getPaths();
+  const php = resolvePhp();
+  const database = resolveDatabase();
+  const mediawiki = resolveMediaWiki();
   const downloaded =
-    fs.existsSync(paths.phpExe) &&
-    fs.existsSync(paths.phpIni) &&
-    fs.existsSync(mariadbBinary('server')) &&
+    php.source !== null &&
+    database.source !== null &&
     isDatabaseInitialized() &&
-    fs.existsSync(path.join(paths.mediaWikiPath, 'index.php'));
+    mediawiki.source === 'installed';
   const installed = fs.existsSync(paths.localSettings);
   const running = isDevMode() ? devServer !== null : phpProcess !== null && mysqlProcess !== null;
 
@@ -395,6 +521,20 @@ function getStatus() {
     phpPort: running ? phpPort : null,
     mysqlPort: running ? mysqlPort : null,
     devMode: isDevMode(),
+    // What each component is (or will be) taken from: 'bundled' = downloaded by
+    // the app, 'system' = installed on the computer, null = has to be downloaded
+    tools: {
+      php: { source: php.source, version: php.version || null, path: php.exe || null, problem: php.problem || null },
+      database: {
+        source: database.source,
+        version: database.version || null,
+        flavor: database.flavor || null,
+        path: database.exe || null,
+        problem: database.problem || null
+      },
+      mediawiki: { source: mediawiki.source, version: mediawiki.version, path: mediawiki.dir }
+    },
+    canDownloadServers: CAN_DOWNLOAD_SERVERS,
     versions: {
       php: DOWNLOADS.php.version,
       mariadb: DOWNLOADS.mariadb.version,
@@ -460,10 +600,62 @@ async function initializeDatabase() {
   const { dbDataDir } = getPaths();
   const partialDir = `${dbDataDir}.partial`;
   fs.rmSync(partialDir, { recursive: true, force: true });
-  await run(mariadbBinary('installDb'), [`--datadir=${partialDir}`]);
+
+  const database = requireDatabase();
+  const asRoot = runsAsRoot() ? ['--user=root'] : [];
+  if (database.flavor === 'mysql') {
+    // MySQL has no separate install tool; root gets an empty password, as with MariaDB
+    await run(database.exe, ['--no-defaults', '--initialize-insecure', `--datadir=${partialDir}`, ...asRoot]);
+  } else if (process.platform === 'win32') {
+    await run(database.installDb, [`--datadir=${partialDir}`]);
+  } else {
+    await run(database.installDb, [
+      '--no-defaults',
+      `--datadir=${partialDir}`,
+      // Password-less root over TCP, like the Windows tool sets up. The server
+      // only listens on the loopback interface.
+      '--auth-root-authentication-method=normal',
+      '--skip-test-db',
+      ...asRoot
+    ]);
+  }
   fs.rmSync(dbDataDir, { recursive: true, force: true });
   fs.renameSync(partialDir, dbDataDir);
   console.log('MySQL data directory initialized');
+}
+
+function assertCanDownload(name, problem) {
+  if (CAN_DOWNLOAD_SERVERS) {
+    return;
+  }
+  const details = problem ? ` נמצאה התקנה שאינה מתאימה: ${problem}.` : '';
+  throw new Error(
+    `${name} אינו מותקן במחשב, והורדה אוטומטית נתמכת רק ב-Windows.${details} יש להתקין את ${name} ולנסות שוב`
+  );
+}
+
+// Copy a MediaWiki installation found on the computer into the data folder, so
+// the existing installation (and its wiki, if any) is never modified.
+function copyMediaWiki(sourceDir, targetDir) {
+  const partialDir = `${targetDir}.partial`;
+  // Per-wiki state of the existing installation; a fresh wiki starts without it
+  const skipped = ['LocalSettings.php', 'images', 'cache'].map(name => path.join(sourceDir, name));
+  fs.rmSync(partialDir, { recursive: true, force: true });
+
+  try {
+    fs.cpSync(sourceDir, partialDir, {
+      recursive: true,
+      // Distribution packages are full of symlinks into other system folders
+      dereference: true,
+      filter: source => !skipped.includes(source)
+    });
+    fs.mkdirSync(path.join(partialDir, 'images'), { recursive: true });
+    fs.mkdirSync(path.join(partialDir, 'cache'), { recursive: true });
+    fs.rmSync(targetDir, { recursive: true, force: true });
+    fs.renameSync(partialDir, targetDir);
+  } finally {
+    fs.rmSync(partialDir, { recursive: true, force: true });
+  }
 }
 
 function createMockServers() {
@@ -494,7 +686,7 @@ function createMockServers() {
 
 // Download required server files. Components that are already present are skipped.
 async function downloadServers() {
-  const { serverPath, phpIni, phpDir, mariadbDir, mediaWikiPath } = getPaths();
+  const { serverPath, phpDir, mariadbDir, mediaWikiPath } = getPaths();
   fs.mkdirSync(serverPath, { recursive: true });
 
   // In dev mode, we'll simulate the downloads with dummy files
@@ -504,14 +696,25 @@ async function downloadServers() {
     return true;
   }
 
-  if (!fs.existsSync(phpIni)) {
+  // Look again for installed software: it may have been added since the last check
+  systemTools.resetCache();
+
+  const php = resolvePhp();
+  if (php.source === 'system') {
+    console.log(`Using installed PHP ${php.version} (${php.exe})`);
+  } else if (!php.source) {
+    assertCanDownload('PHP', php.problem);
     console.log(`Downloading PHP ${DOWNLOADS.php.version}...`);
     await downloadAndExtract(DOWNLOADS.php.urls, phpDir, {
       prepare: (root, finalDir) => configurePhpIni(root, finalDir)
     });
   }
 
-  if (!fs.existsSync(mariadbBinary('server'))) {
+  const database = resolveDatabase();
+  if (database.source === 'system') {
+    console.log(`Using installed ${database.flavor} ${database.version} (${database.exe})`);
+  } else if (!database.source) {
+    assertCanDownload('MariaDB', database.problem);
     console.log(`Downloading MariaDB ${DOWNLOADS.mariadb.version}...`);
     await downloadAndExtract(DOWNLOADS.mariadb.urls, mariadbDir, { stripRootFolder: true });
   }
@@ -525,8 +728,14 @@ async function downloadServers() {
     if (fs.existsSync(getPaths().localSettings)) {
       throw new Error('תיקיית MediaWiki פגומה: LocalSettings.php קיים אך קבצי MediaWiki חסרים');
     }
-    console.log(`Downloading MediaWiki ${DOWNLOADS.mediawiki.version}...`);
-    await downloadAndExtract(DOWNLOADS.mediawiki.urls, mediaWikiPath, { stripRootFolder: true });
+    const mediawiki = resolveMediaWiki();
+    if (mediawiki.source === 'system') {
+      console.log(`Copying installed MediaWiki ${mediawiki.version} from ${mediawiki.dir}`);
+      copyMediaWiki(mediawiki.dir, mediaWikiPath);
+    } else {
+      console.log(`Downloading MediaWiki ${DOWNLOADS.mediawiki.version}...`);
+      await downloadAndExtract(DOWNLOADS.mediawiki.urls, mediaWikiPath, { stripRootFolder: true });
+    }
   }
 
   console.log('All servers downloaded successfully');
@@ -537,11 +746,19 @@ async function downloadServers() {
 // Servers
 // ---------------------------------------------------------------------------
 
-function mysqlAdminShutdown(port) {
-  // --no-defaults: ignore option files of other MariaDB/MySQL installations
-  return run(mariadbBinary('admin'), [
-    '--no-defaults', `--host=${LOOPBACK_HOST}`, `--port=${port}`, '--user=root', 'shutdown'
-  ]);
+// Ask the database server on `port` to shut down cleanly. Done over SQL so no
+// extra admin tool has to be located.
+async function mysqlAdminShutdown(port) {
+  const connection = await mysql.createConnection({
+    host: LOOPBACK_HOST, port, user: 'root', connectTimeout: MYSQL_CONNECT_TIMEOUT_MS
+  });
+  // The server closes the connection while shutting down
+  connection.on('error', () => {});
+  try {
+    await connection.query('SHUTDOWN');
+  } finally {
+    connection.destroy();
+  }
 }
 
 // Start MariaDB if it is not running yet. Resolves with its port once it accepts connections.
@@ -552,15 +769,9 @@ async function startMysql() {
 
   await cleanupStaleProcesses();
 
-  const { dbDataDir } = getPaths();
+  const database = requireDatabase();
   const port = await portfinder.getPortPromise({ port: DEFAULT_MYSQL_PORT });
-  const child = await spawnServer(
-    'MySQL',
-    mariadbBinary('server'),
-    // --no-defaults must come first; it ignores C:\my.ini etc. from other installations
-    ['--no-defaults', `--datadir=${dbDataDir}`, `--port=${port}`, `--bind-address=${LOOPBACK_HOST}`, '--console'],
-    port
-  );
+  const child = await spawnServer('MySQL', database.exe, dbServerArgs(database, port), port);
 
   mysqlProcess = child;
   mysqlPort = port;
@@ -583,14 +794,15 @@ async function startPhp() {
 
   await cleanupStaleProcesses();
 
-  const { phpExe, phpIni, phpDir, mediaWikiPath } = getPaths();
+  const { mediaWikiPath } = getPaths();
+  const php = requirePhp();
   const port = await portfinder.getPortPromise({ port: DEFAULT_PHP_PORT });
   const child = await spawnServer(
     'PHP',
-    phpExe,
-    ['-c', phpIni, '-S', `${LOOPBACK_HOST}:${port}`, '-t', mediaWikiPath],
+    php.exe,
+    phpArgs(php, ['-S', `${LOOPBACK_HOST}:${port}`, '-t', mediaWikiPath]),
     port,
-    { cwd: phpDir, env: { ...process.env, [DB_PORT_ENV]: String(mysqlPort) } }
+    { cwd: php.cwd, env: { ...process.env, [DB_PORT_ENV]: String(mysqlPort) } }
   );
 
   phpProcess = child;
@@ -621,7 +833,7 @@ async function createDatabase(config) {
 async function installMediaWiki(rawConfig) {
   const config = validateConfig(rawConfig);
   const { dbName, dbUser, dbPassword, wikiName, adminUser, adminPassword } = config;
-  const { mediaWikiPath, localSettings, phpExe, phpIni } = getPaths();
+  const { mediaWikiPath, localSettings } = getPaths();
 
   if (fs.existsSync(localSettings)) {
     throw new Error('MediaWiki כבר מותקן (הקובץ LocalSettings.php קיים)');
@@ -645,10 +857,10 @@ async function installMediaWiki(rawConfig) {
   await startMysql();
   await createDatabase(config);
 
+  const php = requirePhp();
   await run(
-    phpExe,
-    [
-      '-c', phpIni,
+    php.exe,
+    phpArgs(php, [
       path.join(mediaWikiPath, 'maintenance', 'install.php'),
       '--dbtype=mysql',
       `--dbserver=${LOOPBACK_HOST}:${mysqlPort}`,
@@ -663,7 +875,7 @@ async function installMediaWiki(rawConfig) {
       `--pass=${adminPassword}`,
       wikiName,
       adminUser
-    ],
+    ]),
     { cwd: mediaWikiPath }
   );
 

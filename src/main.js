@@ -83,7 +83,7 @@ ipcMain.handle('get-status', () => getStatus());
 
 ipcMain.handle('download-servers', async () => {
   try {
-    mainWindow.webContents.send('status-update', 'מוריד שרתים...');
+    mainWindow.webContents.send('status-update', 'מכין שרתים...');
     await downloadServers();
     return { success: true };
   } catch (error) {

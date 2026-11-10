@@ -15,25 +15,20 @@
   "author": "",
   "license": "ISC",
   "devDependencies": {
+    "chai": "^4.3.7",
     "electron": "^26.0.0",
     "electron-builder": "^24.6.0",
-    "chai": "^4.3.7",
     "mocha": "^10.2.0"
   },
   "dependencies": {
     "adm-zip": "^0.5.10",
     "download": "^8.0.0",
+    "mysql2": "^3.24.6",
     "portfinder": "^1.0.32"
   },
   "build": {
     "appId": "com.hamichlol.offline",
     "productName": "המכלול אופליין",
-    "extraResources": [
-      {
-        "from": "resources/",
-        "to": "resources/"
-      }
-    ],
     "win": {
       "target": "nsis"
     },
