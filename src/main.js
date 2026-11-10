@@ -1,8 +1,13 @@
 const { app, BrowserWindow, ipcMain } = require('electron');
 const path = require('path');
-const { downloadServers, installMediaWiki, startServers, stopServers } = require('./server-manager');
+const { setDataPath, getStatus, cleanupStaleProcesses, downloadServers, installMediaWiki, startServers, stopServers } = require('./server-manager');
 
 let mainWindow;
+let isQuitting = false;
+
+// Servers, MediaWiki and the database must live in a writable location.
+// The install directory (process.resourcesPath) is usually read-only.
+setDataPath(process.env.HAMICHLOL_DATA_DIR || path.join(app.getPath('userData'), 'data'));
 
 function createWindow() {
   mainWindow = new BrowserWindow({
@@ -20,24 +25,62 @@ function createWindow() {
   // mainWindow.webContents.openDevTools();
 }
 
-app.whenReady().then(() => {
-  createWindow();
+function setupApp() {
+  app.whenReady().then(() => {
+    // Stop servers left running by a previous run that crashed or was killed
+    cleanupStaleProcesses().catch(error => console.error('Failed to clean up leftover servers:', error));
+    createWindow();
 
-  app.on('activate', () => {
-    if (BrowserWindow.getAllWindows().length === 0) {
-      createWindow();
+    app.on('activate', () => {
+      if (BrowserWindow.getAllWindows().length === 0) {
+        createWindow();
+      }
+    });
+  });
+
+  app.on('second-instance', () => {
+    if (mainWindow) {
+      if (mainWindow.isMinimized()) {
+        mainWindow.restore();
+      }
+      mainWindow.focus();
     }
   });
-});
 
-app.on('window-all-closed', () => {
-  if (process.platform !== 'darwin') {
-    stopServers();
+  app.on('window-all-closed', () => {
+    if (process.platform !== 'darwin') {
+      app.quit();
+    }
+  });
+
+  // Wait for the servers to shut down before the app exits, so MySQL is not left
+  // running in the background or killed mid-write.
+  app.on('before-quit', async (event) => {
+    if (isQuitting) {
+      return;
+    }
+    event.preventDefault();
+    isQuitting = true;
+    try {
+      await stopServers();
+    } catch (error) {
+      console.error('Failed to stop servers on quit:', error);
+    }
     app.quit();
-  }
-});
+  });
+}
+
+// Two instances would fight over the same database files and ports, so a
+// second instance only focuses the existing window and exits.
+if (app.requestSingleInstanceLock()) {
+  setupApp();
+} else {
+  app.quit();
+}
 
 // IPC handlers for communication with renderer process
+ipcMain.handle('get-status', () => getStatus());
+
 ipcMain.handle('download-servers', async () => {
   try {
     mainWindow.webContents.send('status-update', 'מוריד שרתים...');

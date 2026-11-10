@@ -101,15 +101,15 @@
       <form id="wikiSetupForm">
         <div class="form-group">
           <label for="dbName">שם מסד הנתונים:</label>
-          <input type="text" id="dbName" value="wikidb" required>
+          <input type="text" id="dbName" value="wikidb" pattern="[A-Za-z0-9_]{1,64}" title="אותיות לטיניות, ספרות וקו תחתון בלבד" required>
         </div>
         <div class="form-group">
           <label for="dbUser">שם משתמש למסד נתונים:</label>
-          <input type="text" id="dbUser" value="wikiuser" required>
+          <input type="text" id="dbUser" value="wikiuser" pattern="[A-Za-z0-9_]{1,64}" title="אותיות לטיניות, ספרות וקו תחתון בלבד" required>
         </div>
         <div class="form-group">
           <label for="dbPassword">סיסמה למסד נתונים:</label>
-          <input type="password" id="dbPassword" value="password" required>
+          <input type="password" id="dbPassword" required>
         </div>
         <div class="form-group">
           <label for="wikiName">שם האתר:</label>
@@ -120,8 +120,8 @@
           <input type="text" id="adminUser" value="admin" required>
         </div>
         <div class="form-group">
-          <label for="adminPassword">סיסמת מנהל:</label>
-          <input type="password" id="adminPassword" value="admin123" required>
+          <label for="adminPassword">סיסמת מנהל (לפחות 10 תווים):</label>
+          <input type="password" id="adminPassword" minlength="10" required>
         </div>
         <button type="submit">התקן MediaWiki</button>
       </form>
@@ -141,54 +141,92 @@
 
   <script>
     const { ipcRenderer } = require('electron');
-    
+
     // Elements
     const downloadBtn = document.getElementById('downloadBtn');
     const step2 = document.getElementById('step2');
     const step3 = document.getElementById('step3');
     const wikiSetupForm = document.getElementById('wikiSetupForm');
+    const installBtn = wikiSetupForm.querySelector('button[type="submit"]');
     const startServersBtn = document.getElementById('startServersBtn');
     const stopServersBtn = document.getElementById('stopServersBtn');
     const statusEl = document.getElementById('status');
     const wikiBrowser = document.getElementById('wikiBrowser');
-    
-    // Initially disable steps 2 and 3
-    step2.style.display = 'none';
-    step3.style.display = 'none';
-    stopServersBtn.disabled = true;
-    
+
+    function setStatus(message) {
+      statusEl.textContent = `סטטוס: ${message}`;
+    }
+
+    function showWiki(phpPort) {
+      wikiBrowser.src = `http://127.0.0.1:${phpPort}`;
+      wikiBrowser.style.display = 'block';
+    }
+
+    function hideWiki() {
+      wikiBrowser.style.display = 'none';
+      wikiBrowser.src = 'about:blank';
+    }
+
+    // Show only the step that matches what has already been done, so the app
+    // resumes where it left off after a restart.
+    async function refreshView() {
+      const status = await ipcRenderer.invoke('get-status');
+
+      step1.style.display = status.downloaded ? 'none' : 'block';
+      step2.style.display = status.downloaded && !status.installed ? 'block' : 'none';
+      step3.style.display = status.downloaded && status.installed ? 'block' : 'none';
+
+      downloadBtn.disabled = false;
+      installBtn.disabled = false;
+      startServersBtn.disabled = status.running;
+      stopServersBtn.disabled = !status.running;
+
+      if (status.running) {
+        setStatus(`השרתים פועלים (PHP: ${status.phpPort}, MySQL: ${status.mysqlPort})`);
+        showWiki(status.phpPort);
+      } else {
+        hideWiki();
+        if (!status.downloaded) {
+          setStatus('ממתין להתקנה...');
+        } else if (!status.installed) {
+          setStatus('השרתים הורדו. יש להגדיר את MediaWiki');
+        } else {
+          setStatus('המערכת מותקנת. אפשר להפעיל את השרתים');
+        }
+      }
+
+      return status;
+    }
+
     // Status updates
     ipcRenderer.on('status-update', (event, message) => {
-      statusEl.textContent = `סטטוס: ${message}`;
+      setStatus(message);
     });
-    
+
     // Step 1: Download servers
     downloadBtn.addEventListener('click', async () => {
       downloadBtn.disabled = true;
-      statusEl.textContent = 'סטטוס: מוריד שרתים...';
-      
+      setStatus('מוריד שרתים...');
+
       try {
         const result = await ipcRenderer.invoke('download-servers');
         if (result.success) {
-          statusEl.textContent = 'סטטוס: השרתים הורדו בהצלחה';
-          step2.style.display = 'block';
+          await refreshView();
         } else {
-          statusEl.textContent = `סטטוס: שגיאה בהורדת השרתים - ${result.error}`;
+          setStatus(`שגיאה בהורדת השרתים - ${result.error}`);
           downloadBtn.disabled = false;
         }
       } catch (error) {
-        statusEl.textContent = `סטטוס: שגיאה - ${error.message}`;
+        setStatus(`שגיאה - ${error.message}`);
         downloadBtn.disabled = false;
       }
     });
-    
+
     // Step 2: Install MediaWiki
     wikiSetupForm.addEventListener('submit', async (e) => {
       e.preventDefault();
-      
-      const submitBtn = wikiSetupForm.querySelector('button[type="submit"]');
-      submitBtn.disabled = true;
-      
+      installBtn.disabled = true;
+
       const config = {
         dbName: document.getElementById('dbName').value,
         dbUser: document.getElementById('dbUser').value,
@@ -197,67 +235,68 @@
         adminUser: document.getElementById('adminUser').value,
         adminPassword: document.getElementById('adminPassword').value
       };
-      
-      statusEl.textContent = 'סטטוס: מתקין MediaWiki...';
-      
+
+      setStatus('מתקין MediaWiki...');
+
       try {
         const result = await ipcRenderer.invoke('install-mediawiki', config);
         if (result.success) {
-          statusEl.textContent = 'סטטוס: MediaWiki הותקן בהצלחה';
-          step3.style.display = 'block';
+          // Don't keep passwords in the page after a successful install
+          document.getElementById('dbPassword').value = '';
+          document.getElementById('adminPassword').value = '';
+          await refreshView();
         } else {
-          statusEl.textContent = `סטטוס: שגיאה בהתקנת MediaWiki - ${result.error}`;
-          submitBtn.disabled = false;
+          setStatus(`שגיאה בהתקנת MediaWiki - ${result.error}`);
+          installBtn.disabled = false;
         }
       } catch (error) {
-        statusEl.textContent = `סטטוס: שגיאה - ${error.message}`;
-        submitBtn.disabled = false;
+        setStatus(`שגיאה - ${error.message}`);
+        installBtn.disabled = false;
       }
     });
-    
+
     // Step 3: Start/Stop Servers
     startServersBtn.addEventListener('click', async () => {
       startServersBtn.disabled = true;
-      statusEl.textContent = 'סטטוס: מפעיל שרתים...';
-      
+      setStatus('מפעיל שרתים...');
+
       try {
         const result = await ipcRenderer.invoke('start-servers');
         if (result.success) {
-          statusEl.textContent = `סטטוס: השרתים פועלים (PHP: ${result.phpPort}, MySQL: ${result.mysqlPort})`;
-          stopServersBtn.disabled = false;
-          
-          // Show wiki in iframe
-          wikiBrowser.src = `http://localhost:${result.phpPort}`;
-          wikiBrowser.style.display = 'block';
+          await refreshView();
         } else {
-          statusEl.textContent = `סטטוס: שגיאה בהפעלת השרתים - ${result.error}`;
+          setStatus(`שגיאה בהפעלת השרתים - ${result.error}`);
           startServersBtn.disabled = false;
         }
       } catch (error) {
-        statusEl.textContent = `סטטוס: שגיאה - ${error.message}`;
+        setStatus(`שגיאה - ${error.message}`);
         startServersBtn.disabled = false;
       }
     });
-    
+
     stopServersBtn.addEventListener('click', async () => {
       stopServersBtn.disabled = true;
-      statusEl.textContent = 'סטטוס: מכבה שרתים...';
-      
+      setStatus('מכבה שרתים...');
+
       try {
         const result = await ipcRenderer.invoke('stop-servers');
         if (result.success) {
-          statusEl.textContent = 'סטטוס: השרתים כבויים';
-          startServersBtn.disabled = false;
-          wikiBrowser.style.display = 'none';
+          await refreshView();
         } else {
-          statusEl.textContent = `סטטוס: שגיאה בכיבוי השרתים - ${result.error}`;
+          setStatus(`שגיאה בכיבוי השרתים - ${result.error}`);
           stopServersBtn.disabled = false;
         }
       } catch (error) {
-        statusEl.textContent = `סטטוס: שגיאה - ${error.message}`;
+        setStatus(`שגיאה - ${error.message}`);
         stopServersBtn.disabled = false;
       }
     });
+
+    // Hide everything until the status is known
+    step1.style.display = 'none';
+    step2.style.display = 'none';
+    step3.style.display = 'none';
+    refreshView().catch(error => setStatus(`שגיאה - ${error.message}`));
   </script>
 </body>
 </html>
