@@ -50,7 +50,7 @@ npm run dist
 | רכיב | דרישות | מה נעשה איתו |
 |------|--------|---------------|
 | PHP | גרסה 8.1 ומעלה (CLI) עם ההרחבות mysqli, intl, mbstring, fileinfo, openssl, xml, xmlreader, dom, ctype, iconv, json | מורץ ישירות, עם קובץ ה-`php.ini` שלו |
-| MariaDB / MySQL | MariaDB 10.3 ומעלה (כולל `mariadb-install-db`) או MySQL 5.7 ומעלה | רק התוכנה משותפת: האפליקציה מריצה תהליך משלה, בפורט משלה ועם תיקיית נתונים משלה. שרת שכבר פועל במחשב והנתונים שלו אינם מושפעים |
+| MariaDB / MySQL | MariaDB 10.3 ומעלה (כולל `mariadb-install-db`) או MySQL 5.7.6 ומעלה | רק התוכנה משותפת: האפליקציה מריצה תהליך משלה, בפורט משלה ועם תיקיית נתונים משלה. שרת שכבר פועל במחשב והנתונים שלו אינם מושפעים |
 | MediaWiki | גרסה 1.39 ומעלה | מועתק לתיקיית הנתונים של האפליקציה, בלי `LocalSettings.php`, ‏`images` ו-`cache`. ההתקנה הקיימת אינה משתנה |
 
 החיפוש נעשה ב-`PATH` ובתיקיות התקנה נפוצות (למשל XAMPP, WampServer, Laragon ו-`Program Files` ב-Windows;‏ `/usr/bin`, ‏`/usr/sbin`, ‏`/usr/share/mediawiki` ו-Homebrew במערכות אחרות).

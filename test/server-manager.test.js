@@ -464,6 +464,21 @@ describe('Installed software detection', function() {
     expect(systemTools.findSystemDatabase([exe])).to.include({ version: '8.4.0', flavor: 'mysql', usable: true });
   });
 
+  it('should reject a MySQL too old to create its own data folder', function() {
+    const exe = writeScript('oldmysql/bin/mysqld', "echo 'mysqld  Ver 5.7.5 for Linux on x86_64 (MySQL Community Server (GPL))'");
+    const result = systemTools.findSystemDatabase([exe]);
+    expect(result.usable).to.be.false;
+    expect(result.reason).to.include(systemTools.MIN_VERSIONS.mysql);
+  });
+
+  it('should only pass --mysqlx=OFF to servers that know the option', function() {
+    const { dbServerArgs } = require('../src/server-manager');
+    const args = (flavor, version) => dbServerArgs({ flavor, version }, 3306);
+    expect(args('mysql', '8.0.36')).to.include('--mysqlx=OFF');
+    expect(args('mysql', '5.7.44')).to.not.include('--mysqlx=OFF');
+    expect(args('mariadb', '11.4.2')).to.not.include('--mysqlx=OFF');
+  });
+
   it('should accept a complete MediaWiki and reject old or incomplete ones', function() {
     const good = fakeMediaWiki('mw-good', '1.39.7');
     const old = fakeMediaWiki('mw-old', '1.35.14');

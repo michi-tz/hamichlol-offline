@@ -37,6 +37,9 @@ const MARIADB_BINARIES = {
 // Automatic downloads are Windows builds; elsewhere installed software is used.
 const CAN_DOWNLOAD_SERVERS = process.platform === 'win32';
 
+// From this MySQL version the X protocol plugin is built in and on by default.
+const MYSQLX_BUILTIN_SINCE = '8.0.0';
+
 // Unix socket paths are limited to about 100 characters.
 const MAX_SOCKET_PATH_LENGTH = 100;
 
@@ -193,8 +196,9 @@ function dbServerArgs(database, port) {
       args.push('--user=root');
     }
   }
-  if (database.flavor === 'mysql') {
-    // MySQL 8 also listens on a second (X protocol) port unless disabled
+  if (database.flavor === 'mysql' && systemTools.compareVersions(database.version, MYSQLX_BUILTIN_SINCE) >= 0) {
+    // MySQL 8 also listens on a second (X protocol) port unless disabled.
+    // Older servers do not know the option and would refuse to start.
     args.push('--mysqlx=OFF');
   }
   return args;
@@ -981,6 +985,7 @@ async function stopServers() {
 
 module.exports = {
   setDataPath,
+  dbServerArgs,
   getPaths,
   getStatus,
   cleanupStaleProcesses,

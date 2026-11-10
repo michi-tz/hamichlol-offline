@@ -16,7 +16,8 @@ const INSPECT_TIMEOUT_MS = 15000;
 const MIN_VERSIONS = {
   php: '8.1.0',
   mariadb: '10.3.0',
-  mysql: '5.7.0',
+  // 5.7.6 introduced "mysqld --initialize-insecure", which creates the data folder
+  mysql: '5.7.6',
   mediawiki: '1.39.0'
 };
 
