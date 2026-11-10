@@ -292,6 +292,7 @@ describe('Real mode with fake servers', function() {
 
     const { phpExe, phpIni, mariadbDir, dbDataDir, mediaWikiPath, localSettings } = getPaths();
     writeScript(phpExe, `
+      if (process.env.FAKE_PHP_FAILS) process.exit(1);
       const [host, port] = process.argv[process.argv.indexOf('-S') + 1].split(':');
       require('http').createServer((q, r) => r.end('db=' + process.env.HAMICHLOL_DB_PORT)).listen(+port, host);
     `);
@@ -402,6 +403,24 @@ describe('Real mode with fake servers', function() {
     } finally {
       other.kill();
     }
+  });
+
+  it('should stop the database again when PHP fails to start', async function() {
+    process.env.FAKE_PHP_FAILS = '1';
+    try {
+      const error = await startServers().then(() => null, failure => failure);
+      expect(error).to.be.an('error');
+      expect(error.message).to.include('PHP');
+      expect(getStatus().running).to.be.false;
+      // Nothing is left running behind a UI that says "stopped"
+      expect(fs.existsSync(getPaths().runStateFile)).to.be.false;
+    } finally {
+      delete process.env.FAKE_PHP_FAILS;
+    }
+    // And a later start works normally
+    await startServers();
+    expect(getStatus().running).to.be.true;
+    await stopServers();
   });
 
   it('should stop a server that is still starting', async function() {

@@ -979,31 +979,40 @@ async function installMediaWiki(rawConfig) {
     return true;
   }
 
-  // The installer needs a running database server
+  // The installer needs a running database server. It is stopped again afterwards
+  // (unless it was already running), so the app is never left half-started.
+  const mysqlWasRunning = mysqlProcess !== null;
   await startMysql();
-  await createDatabase(config);
+  try {
+    await createDatabase(config);
 
-  const php = requirePhp();
-  await run(
-    php.exe,
-    phpArgs(php, [
-      path.join(mediaWikiPath, 'maintenance', 'install.php'),
-      '--dbtype=mysql',
-      `--dbserver=${LOOPBACK_HOST}:${mysqlPort}`,
-      `--dbname=${dbName}`,
-      `--dbuser=${dbUser}`,
-      `--dbpass=${dbPassword}`,
-      `--installdbuser=${dbUser}`,
-      `--installdbpass=${dbPassword}`,
-      '--dbprefix=mw_',
-      `--server=http://localhost:${DEFAULT_PHP_PORT}`,
-      '--scriptpath=',
-      `--pass=${adminPassword}`,
-      wikiName,
-      adminUser
-    ]),
-    { cwd: mediaWikiPath }
-  );
+    const php = requirePhp();
+    await run(
+      php.exe,
+      phpArgs(php, [
+        path.join(mediaWikiPath, 'maintenance', 'install.php'),
+        '--dbtype=mysql',
+        `--dbserver=${LOOPBACK_HOST}:${mysqlPort}`,
+        `--dbname=${dbName}`,
+        `--dbuser=${dbUser}`,
+        `--dbpass=${dbPassword}`,
+        `--installdbuser=${dbUser}`,
+        `--installdbpass=${dbPassword}`,
+        '--dbprefix=mw_',
+        `--server=http://localhost:${DEFAULT_PHP_PORT}`,
+        '--scriptpath=',
+        `--pass=${adminPassword}`,
+        wikiName,
+        adminUser
+      ]),
+      { cwd: mediaWikiPath }
+    );
+  } finally {
+    if (!mysqlWasRunning) {
+      await stopMysql().catch(error => console.error(`Failed to stop MySQL: ${error.message}`));
+      writeRunState();
+    }
+  }
 
   patchLocalSettings(localSettings);
   console.log('MediaWiki installed successfully');
@@ -1052,8 +1061,18 @@ async function startServers() {
     return { phpPort, mysqlPort };
   }
 
+  const mysqlWasRunning = mysqlProcess !== null;
   await startMysql();
-  await startPhp();
+  try {
+    await startPhp();
+  } catch (error) {
+    // Half-started servers would be reported as "not running", with no way to stop them
+    if (!mysqlWasRunning) {
+      await stopMysql().catch(stopError => console.error(`Failed to stop MySQL: ${stopError.message}`));
+      writeRunState();
+    }
+    throw error;
+  }
 
   return { phpPort, mysqlPort };
 }
