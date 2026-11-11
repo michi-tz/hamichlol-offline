@@ -39,12 +39,19 @@ describe('Downloads', function() {
   let baseUrl;
   let files;       // URL path -> zip buffer (missing = 404)
   let requests;    // URL paths requested, in order
+  let redirects;   // URL path -> path it redirects to
+  let truncated;   // URL paths whose download is cut off half-way
   let restoreEnv;
   let savedUrls;
 
   before(async function() {
     server = http.createServer((request, response) => {
       requests.push(request.url);
+      if (redirects[request.url]) {
+        response.writeHead(302, { Location: redirects[request.url] });
+        response.end();
+        return;
+      }
       const body = files[request.url];
       if (!body) {
         response.statusCode = 404;
@@ -52,6 +59,12 @@ describe('Downloads', function() {
         return;
       }
       response.setHeader('Content-Type', 'application/zip');
+      if (truncated.has(request.url)) {
+        // Promise the whole file, send half and cut the connection
+        response.setHeader('Content-Length', body.length);
+        response.write(body.subarray(0, Math.floor(body.length / 2)), () => response.destroy());
+        return;
+      }
       response.end(body);
     });
     await new Promise(resolve => server.listen(0, '127.0.0.1', resolve));
@@ -69,6 +82,8 @@ describe('Downloads', function() {
     setDataPath(tempDir);
     files = {};
     requests = [];
+    redirects = {};
+    truncated = new Set();
     savedUrls = {};
     for (const [name, entry] of Object.entries(DOWNLOADS)) {
       savedUrls[name] = entry.urls;
@@ -155,6 +170,35 @@ describe('Downloads', function() {
 
     it('should fail on a file that is not a zip archive, leaving nothing behind', async function() {
       files['/a.zip'] = Buffer.from('<html>captive portal</html>');
+      const target = path.join(tempDir, 'out');
+
+      const error = await downloadAndExtract([`${baseUrl}/a.zip`], target).then(() => null, failure => failure);
+
+      expect(error).to.be.an('error');
+      expect(fs.readdirSync(tempDir)).to.deep.equal([]);
+    });
+
+    it('should follow redirects', async function() {
+      files['/real.zip'] = zipOf({ 'one.txt': '1' });
+      redirects['/moved.zip'] = '/real.zip';
+      const target = path.join(tempDir, 'out');
+
+      await downloadAndExtract([`${baseUrl}/moved.zip`], target);
+
+      expect(requests).to.deep.equal(['/moved.zip', '/real.zip']);
+      expect(fs.existsSync(path.join(target, 'one.txt'))).to.be.true;
+    });
+
+    it('should say which HTTP error a failed download got', async function() {
+      const error = await downloadAndExtract([`${baseUrl}/gone.zip`], path.join(tempDir, 'out'))
+        .then(() => null, failure => failure);
+
+      expect(error.message).to.include('404');
+    });
+
+    it('should fail when the connection drops in the middle of a file', async function() {
+      truncated.add('/a.zip');
+      files['/a.zip'] = zipOf({ 'one.txt': '1' });
       const target = path.join(tempDir, 'out');
 
       const error = await downloadAndExtract([`${baseUrl}/a.zip`], target).then(() => null, failure => failure);

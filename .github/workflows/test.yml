@@ -25,7 +25,7 @@ jobs:
       - uses: actions/checkout@v5
       - uses: actions/setup-node@v5
         with:
-          node-version: 20
+          node-version: 22
           cache: npm
       - run: npm ci
       - run: npm test
@@ -38,7 +38,7 @@ jobs:
       - uses: actions/checkout@v5
       - uses: actions/setup-node@v5
         with:
-          node-version: 20
+          node-version: 22
           cache: npm
       # The runner image ships MySQL; the tests use the distribution's MariaDB,
       # PHP and MediaWiki, the combination documented in the README.

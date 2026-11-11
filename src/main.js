@@ -1,6 +1,6 @@
-const { app, BrowserWindow, ipcMain } = require('electron');
+const { app, BrowserWindow, ipcMain, net } = require('electron');
 const path = require('path');
-const { setDataPath, getStatus, cleanupStaleProcesses, downloadServers, installMediaWiki, startServers, stopServers } = require('./server-manager');
+const { setDataPath, setFetch, getStatus, cleanupStaleProcesses, downloadServers, installMediaWiki, startServers, stopServers } = require('./server-manager');
 
 let mainWindow;
 let isQuitting = false;
@@ -8,6 +8,11 @@ let isQuitting = false;
 // Servers, MediaWiki and the database must live in a writable location.
 // The install directory (process.resourcesPath) is usually read-only.
 setDataPath(process.env.HAMICHLOL_DATA_DIR || path.join(app.getPath('userData'), 'data'));
+
+// Download through Chromium's network stack rather than Node's: it uses the
+// proxy and the certificates configured on the computer, which matters behind
+// content filters and corporate proxies.
+setFetch((url, options) => net.fetch(url, options));
 
 function createWindow() {
   mainWindow = new BrowserWindow({
@@ -86,19 +91,11 @@ if (app.requestSingleInstanceLock()) {
   app.quit();
 }
 
-// The window may be closed while a long operation is still running
-function sendStatus(message) {
-  if (mainWindow && !mainWindow.isDestroyed()) {
-    mainWindow.webContents.send('status-update', message);
-  }
-}
-
 // IPC handlers for communication with renderer process
 ipcMain.handle('get-status', () => getStatus());
 
 ipcMain.handle('download-servers', async () => {
   try {
-    sendStatus('מכין שרתים...');
     await downloadServers();
     return { success: true };
   } catch (error) {
@@ -109,7 +106,6 @@ ipcMain.handle('download-servers', async () => {
 
 ipcMain.handle('install-mediawiki', async (event, config) => {
   try {
-    sendStatus('מתקין MediaWiki...');
     await installMediaWiki(config);
     return { success: true };
   } catch (error) {
@@ -120,9 +116,7 @@ ipcMain.handle('install-mediawiki', async (event, config) => {
 
 ipcMain.handle('start-servers', async () => {
   try {
-    sendStatus('מפעיל שרתים...');
     const ports = await startServers();
-    sendStatus('השרתים פועלים');
     return { success: true, ...ports };
   } catch (error) {
     console.error('Failed to start servers:', error);
@@ -132,9 +126,7 @@ ipcMain.handle('start-servers', async () => {
 
 ipcMain.handle('stop-servers', async () => {
   try {
-    sendStatus('מכבה שרתים...');
     await stopServers();
-    sendStatus('השרתים כבויים');
     return { success: true };
   } catch (error) {
     console.error('Failed to stop servers:', error);

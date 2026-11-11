@@ -17,7 +17,7 @@
 
 ## התקנה למפתחים
 
-1. התקן את Node.js
+1. התקן את Node.js בגרסה 22.12 ומעלה (דרישה של Electron)
 2. שבט (Clone) את המאגר:
 ```bash
 git clone https://github.com/michi-tz/hamichlol-offline.git

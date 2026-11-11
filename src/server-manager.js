@@ -3,7 +3,8 @@ const os = require('os');
 const net = require('net');
 const path = require('path');
 const { execFile, spawn } = require('child_process');
-const download = require('download');
+const { Readable } = require('stream');
+const { pipeline } = require('stream/promises');
 const AdmZip = require('adm-zip');
 const portfinder = require('portfinder');
 const mysql = require('mysql2/promise');
@@ -70,6 +71,15 @@ let mysqlPort = null;
 
 function setDataPath(dir) {
   dataPath = dir;
+}
+
+// How files are downloaded. Node's own fetch by default; the Electron main
+// process replaces it with Chromium's network stack, which honours the
+// computer's proxy settings and certificate store.
+let fetchImpl = (url, options) => fetch(url, options);
+
+function setFetch(implementation) {
+  fetchImpl = implementation;
 }
 
 function getPaths() {
@@ -699,12 +709,21 @@ function getStatus() {
 // Downloads
 // ---------------------------------------------------------------------------
 
+// Save `url` to `filePath`, following redirects.
+async function downloadFile(url, filePath) {
+  const response = await fetchImpl(url, { redirect: 'follow' });
+  if (!response.ok || !response.body) {
+    throw new Error(`HTTP ${response.status} ${response.statusText}`.trim());
+  }
+  await pipeline(Readable.fromWeb(response.body), fs.createWriteStream(filePath));
+}
+
 async function downloadFirstAvailable(urls, zipPath) {
   let lastError = null;
   for (const url of urls) {
     try {
       console.log(`Downloading ${url}`);
-      await download(url, path.dirname(zipPath), { filename: path.basename(zipPath) });
+      await downloadFile(url, zipPath);
       return;
     } catch (error) {
       console.error(`Download failed from ${url}: ${error.message}`);
@@ -1189,6 +1208,7 @@ async function stopServers() {
 
 module.exports = {
   setDataPath,
+  setFetch,
   dbServerArgs,
   getPaths,
   getStatus,
