@@ -1,0 +1,57 @@
+name: Tests
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: tests-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  unit:
+    name: Unit tests (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest, macos-latest]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+      - run: npm ci
+      - run: npm test
+
+  integration:
+    name: Real software and app window (Ubuntu)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+      # The runner image ships MySQL; the tests use the distribution's MariaDB,
+      # PHP and MediaWiki, the combination documented in the README.
+      - name: Install PHP, MariaDB and MediaWiki
+        run: |
+          sudo systemctl stop mysql || true
+          sudo apt-get remove --purge -y 'mysql-server*' 'mysql-client*' mysql-common || true
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            php-cli php-mysql php-intl php-mbstring php-xml mariadb-server mediawiki xvfb
+          sudo systemctl stop mariadb || true
+      - run: npm ci
+      - name: Flow against the installed software
+        run: npm run test:system
+      - name: Application window
+        run: xvfb-run -a npm run test:e2e
+        env:
+          HAMICHLOL_E2E_NO_SANDBOX: '1'

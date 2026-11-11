@@ -42,7 +42,9 @@ const MARIADB_BINARIES = {
 };
 
 // Automatic downloads are Windows builds; elsewhere installed software is used.
-const CAN_DOWNLOAD_SERVERS = process.platform === 'win32';
+function canDownloadServers() {
+  return process.platform === 'win32';
+}
 
 // Unix socket paths are limited to about 100 characters.
 const MAX_SOCKET_PATH_LENGTH = 100;
@@ -349,7 +351,9 @@ async function terminate(child) {
 
 function readRunState() {
   try {
-    return JSON.parse(fs.readFileSync(getPaths().runStateFile, 'utf8'));
+    const state = JSON.parse(fs.readFileSync(getPaths().runStateFile, 'utf8'));
+    // A damaged file must not stop the servers from ever starting again
+    return state && typeof state === 'object' ? state : {};
   } catch (error) {
     return {};
   }
@@ -600,12 +604,13 @@ function configurePhpIni(sourceDir, finalDir) {
   let content = fs.readFileSync(path.join(sourceDir, 'php.ini-development'), 'utf8');
   // Without an explicit extension_dir, Windows PHP looks for extensions in C:\php\ext
   content = content.replace(
-    /^;\s*extension_dir\s*=\s*"ext"\s*$/m,
+    /^;\s*extension_dir\s*=\s*"ext"[ \t]*(?=\r?$)/m,
     () => `extension_dir = "${path.join(finalDir, 'ext')}"`
   );
   for (const extension of PHP_EXTENSIONS) {
     content = content.replace(
-      new RegExp(`^;extension=${extension}\\s*$`, 'm'),
+      // Only trailing blanks may follow, so line endings and neighbours are kept
+      new RegExp(`^;extension=${extension}[ \\t]*(?=\\r?$)`, 'm'),
       `extension=${extension}`
     );
   }
@@ -658,7 +663,7 @@ function getStatus() {
       },
       mediawiki: { source: mediawiki.source, version: mediawiki.version, path: mediawiki.dir, problem: mediawiki.problem || null }
     },
-    canDownloadServers: CAN_DOWNLOAD_SERVERS,
+    canDownloadServers: canDownloadServers(),
     versions: {
       php: DOWNLOADS.php.version,
       mariadb: DOWNLOADS.mariadb.version,
@@ -749,7 +754,7 @@ async function initializeDatabase() {
 }
 
 function assertCanDownload(name, problem) {
-  if (CAN_DOWNLOAD_SERVERS) {
+  if (canDownloadServers()) {
     return;
   }
   const details = problem ? ` נמצאה התקנה שאינה מתאימה: ${problem}.` : '';
@@ -1124,7 +1129,11 @@ async function stopServers() {
   if (devServer) {
     const server = devServer;
     devServer = null;
-    await new Promise(resolve => server.close(() => resolve()));
+    await new Promise(resolve => {
+      server.close(() => resolve());
+      // Do not wait for idle keep-alive connections (e.g. the wiki frame's)
+      server.closeAllConnections();
+    });
     console.log('Mock PHP server stopped');
   }
 
@@ -1164,5 +1173,14 @@ module.exports = {
   downloadServers,
   installMediaWiki,
   startServers,
-  stopServers
+  stopServers,
+  // Building blocks, exported for the tests only
+  _internal: {
+    configurePhpIni,
+    downloadAndExtract,
+    copyMediaWiki,
+    identifyProcess,
+    mysqlAdminShutdown,
+    createDatabase
+  }
 };

@@ -6,7 +6,11 @@
   "scripts": {
     "start": "electron .",
     "dev": "set DEV_MODE=true&& electron .",
-    "test": "mocha test/**/*.test.js",
+    "test": "mocha \"test/**/*.test.js\"",
+    "test:system": "mocha \"test/system/*.system.js\"",
+    "test:e2e": "mocha \"test/e2e/*.e2e.js\"",
+    "test:all": "npm test && npm run test:system && npm run test:e2e",
+    "coverage": "c8 --reporter=text --reporter=html mocha \"test/**/*.test.js\"",
     "check-downloads": "node scripts/check-downloads.js",
     "pack": "electron-builder --dir",
     "dist": "electron-builder",
@@ -15,10 +19,12 @@
   "author": "",
   "license": "ISC",
   "devDependencies": {
+    "c8": "^12.0.0",
     "chai": "^4.3.7",
     "electron": "^26.0.0",
     "electron-builder": "^24.6.0",
-    "mocha": "^10.2.0"
+    "mocha": "^10.2.0",
+    "playwright-core": "^1.65.0"
   },
   "dependencies": {
     "adm-zip": "^0.5.10",
