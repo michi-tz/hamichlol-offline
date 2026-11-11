@@ -150,8 +150,9 @@ function resolveMediaWiki() {
   if (found && found.usable) {
     // An installed MediaWiki newer than the available PHP supports cannot be
     // installed; the version this app downloads works with every accepted PHP
-    const php = resolvePhp();
-    const phpTooOld = Boolean(found.minPhp && php.version) && systemTools.compareVersions(php.version, found.minPhp) < 0;
+    // With no PHP available yet, the one this app would download is what counts
+    const phpVersion = resolvePhp().version || DOWNLOADS.php.version;
+    const phpTooOld = Boolean(found.minPhp) && systemTools.compareVersions(phpVersion, found.minPhp) < 0;
     if (!phpTooOld) {
       return { source: 'system', dir: found.dir, version: found.version };
     }

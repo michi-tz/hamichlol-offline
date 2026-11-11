@@ -813,6 +813,34 @@ describe('Real mode with installed software', function() {
     }
   });
 
+  it('should check an installed MediaWiki even when its PHP is not the configured one', function() {
+    const source = process.env[systemTools.ENV.mediawiki];
+    const copy = getPaths().mediaWikiPath;
+    const hidden = `${copy}.hidden`;
+    const php = process.env[systemTools.ENV.php];
+    fs.renameSync(copy, hidden);
+    // Without the fake PHP, the version that decides is a real PHP if this
+    // computer has one, and otherwise the version that would be downloaded
+    process.env[systemTools.ENV.php] = path.join(tempDir, 'no-such-php');
+    const savedPath = process.env.PATH;
+    process.env.PATH = '';
+    try {
+      fs.writeFileSync(path.join(source, 'composer.json'), JSON.stringify({ require: { php: '>=99.0.0' } }));
+      systemTools.resetCache();
+      expect(getStatus().tools.mediawiki.source).to.equal('download');
+
+      fs.writeFileSync(path.join(source, 'composer.json'), JSON.stringify({ require: { php: `>=${systemTools.MIN_VERSIONS.php}` } }));
+      systemTools.resetCache();
+      expect(getStatus().tools.mediawiki.source).to.equal('system');
+    } finally {
+      process.env.PATH = savedPath;
+      process.env[systemTools.ENV.php] = php;
+      fs.rmSync(path.join(source, 'composer.json'));
+      fs.renameSync(hidden, copy);
+      systemTools.resetCache();
+    }
+  });
+
   it('should ignore installed software when it is switched off', function() {
     process.env[systemTools.ENV.enabled] = 'false';
     try {
