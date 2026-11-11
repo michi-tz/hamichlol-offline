@@ -429,6 +429,34 @@ describe('Real mode with fake servers', function() {
     await stopServers();
   });
 
+  it('should stop the database when PHP dies on its own', async function() {
+    await startServers();
+    const state = JSON.parse(fs.readFileSync(getPaths().runStateFile, 'utf8'));
+
+    process.kill(state.php.pid, 'SIGKILL');
+    for (let i = 0; i < 40 && isAlive(state.mysql.pid); i++) {
+      await new Promise(resolve => setTimeout(resolve, 100));
+    }
+
+    expect(isAlive(state.mysql.pid)).to.be.false;
+    expect(getStatus().running).to.be.false;
+    await new Promise(resolve => setTimeout(resolve, 200));
+    expect(fs.existsSync(getPaths().runStateFile)).to.be.false;
+  });
+
+  it('should stop PHP when the database dies on its own', async function() {
+    await startServers();
+    const state = JSON.parse(fs.readFileSync(getPaths().runStateFile, 'utf8'));
+
+    process.kill(state.mysql.pid, 'SIGKILL');
+    for (let i = 0; i < 40 && isAlive(state.php.pid); i++) {
+      await new Promise(resolve => setTimeout(resolve, 100));
+    }
+
+    expect(isAlive(state.php.pid)).to.be.false;
+    expect(getStatus().running).to.be.false;
+  });
+
   it('should stop a server that is still starting', async function() {
     process.env.FAKE_SERVER_NEVER_READY = '1';
     try {

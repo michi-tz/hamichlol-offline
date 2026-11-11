@@ -56,6 +56,9 @@ let phpProcess = null;
 let mysqlProcess = null;
 let devServer = null;
 
+// True while stopServers() runs, so exits it causes are not treated as crashes
+let stopping = false;
+
 // Servers that were spawned but do not accept connections yet: key -> { child, port }
 const startingServers = new Map();
 
@@ -888,6 +891,16 @@ async function mysqlAdminShutdown(port) {
   }
 }
 
+// When one server dies on its own, stop the other one too. Otherwise the app
+// would report "not running" while a server it can no longer stop keeps going.
+function stopSurvivor(exitedLabel, survivor) {
+  if (stopping || !survivor) {
+    return;
+  }
+  console.error(`${exitedLabel} server exited unexpectedly; stopping the other server`);
+  stopServers().catch(error => console.error(`Failed to stop servers: ${error.message}`));
+}
+
 // Start MariaDB if it is not running yet. Resolves with its port once it accepts connections.
 async function startMysql() {
   if (mysqlProcess) {
@@ -908,6 +921,7 @@ async function startMysql() {
       mysqlProcess = null;
       mysqlPort = null;
       writeRunState();
+      stopSurvivor('MySQL', phpProcess);
     }
   });
   return port;
@@ -941,6 +955,7 @@ async function startPhp() {
       phpProcess = null;
       phpPort = null;
       writeRunState();
+      stopSurvivor('PHP', mysqlProcess);
     }
   });
   return port;
@@ -1114,6 +1129,7 @@ async function stopServers() {
 
   const wasRunning = phpProcess !== null || mysqlProcess !== null || startingServers.size > 0;
 
+  stopping = true;
   try {
     // Servers caught in the middle of starting; their pending start then fails
     for (const { child } of [...startingServers.values()]) {
@@ -1126,6 +1142,7 @@ async function stopServers() {
     }
     await stopMysql();
   } finally {
+    stopping = false;
     if (wasRunning) {
       writeRunState();
     }
