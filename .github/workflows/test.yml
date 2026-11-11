@@ -16,6 +16,7 @@ jobs:
   unit:
     name: Unit tests (${{ matrix.os }})
     runs-on: ${{ matrix.os }}
+    timeout-minutes: 15
     strategy:
       fail-fast: false
       matrix:
@@ -32,6 +33,7 @@ jobs:
   integration:
     name: Real software and app window (Ubuntu)
     runs-on: ubuntu-latest
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@v5
       - uses: actions/setup-node@v5
@@ -44,15 +46,18 @@ jobs:
         run: |
           sudo systemctl stop mysql || true
           sudo apt-get remove --purge -y 'mysql-server*' 'mysql-client*' mysql-common || true
-          # The package mirrors are sometimes unreachable for a while, so retry
-          for attempt in 1 2 3 4 5; do
-            if sudo apt-get update -o Acquire::Retries=3 &&
-               sudo apt-get install -y --no-install-recommends -o Acquire::Retries=3 \
+          # The package mirrors are sometimes unreachable for a while, so retry,
+          # with short timeouts so that a failed attempt does not take long
+          APT_OPTIONS="-o Acquire::Retries=1 -o Acquire::http::Timeout=20 -o Acquire::https::Timeout=20"
+          for attempt in 1 2 3; do
+            getent hosts archive.ubuntu.com azure.archive.ubuntu.com security.ubuntu.com || echo "Name lookup failed"
+            if sudo apt-get update $APT_OPTIONS &&
+               sudo apt-get install -y --no-install-recommends $APT_OPTIONS \
                  php-cli php-mysql php-intl php-mbstring php-xml mariadb-server mediawiki xvfb; then
               break
             fi
-            if [ "$attempt" = 5 ]; then
-              echo "::error::Could not install the packages after 5 attempts"
+            if [ "$attempt" = 3 ]; then
+              echo "::error::Could not install the packages after 3 attempts"
               exit 1
             fi
             echo "Attempt $attempt failed; retrying in 60 seconds"
