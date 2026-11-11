@@ -4,15 +4,14 @@
 
 ## מאפיינים
 
-- התקנה אוטומטית של שרת PHP
-- התקנה אוטומטית של שרת MySQL/MariaDB
-- התקנה אוטומטית של MediaWiki
+- שימוש ב-PHP, MariaDB/MySQL ו-MediaWiki שכבר מותקנים במחשב
+- הורדה והתקנה אוטומטית של מה שחסר (PHP ו-MariaDB: ב-Windows בלבד)
 - ממשק משתמש פשוט לניהול השרתים
 - הרצת המערכת ללא צורך בחיבור לאינטרנט
 
 ## דרישות מערכת
 
-- Windows 10 ומעלה
+- Windows 10 ומעלה, או לינוקס / macOS עם PHP ו-MariaDB (או MySQL) מותקנים
 - מינימום 500MB פנויים בדיסק
 - מינימום 4GB RAM
 
@@ -21,7 +20,7 @@
 1. התקן את Node.js
 2. שבט (Clone) את המאגר:
 ```bash
-git clone https://github.com/yourusername/hamichlol-offline.git
+git clone https://github.com/michi-tz/hamichlol-offline.git
 cd hamichlol-offline
 ```
 
@@ -43,6 +42,84 @@ npm run dist
 
 הקובץ המותקן יהיה זמין בתיקיית `dist`.
 
+## שימוש בתוכנות שכבר מותקנות במחשב
+
+לפני הורדה, האפליקציה מחפשת במחשב PHP, שרת מסד נתונים (MariaDB או MySQL) ו-MediaWiki.
+מה שנמצא ומתאים משמש כמות שהוא, ורק מה שחסר יורד. שלב 1 בממשק מציג מה נמצא ומאיפה.
+
+| רכיב | דרישות | מה נעשה איתו |
+|------|--------|---------------|
+| PHP | גרסה 8.1 ומעלה (CLI) עם ההרחבות mysqli, intl, mbstring, fileinfo, openssl, xml, xmlreader, dom, ctype, iconv, json | מורץ ישירות, עם קובץ ה-`php.ini` שלו |
+| MariaDB / MySQL | MariaDB 10.3 ומעלה (כולל `mariadb-install-db`) או MySQL 5.7.6 ומעלה | רק התוכנה משותפת: האפליקציה מריצה תהליך משלה, בפורט משלה ועם תיקיית נתונים משלה. שרת שכבר פועל במחשב והנתונים שלו אינם מושפעים |
+| MediaWiki | גרסה 1.39 ומעלה | מועתק לתיקיית הנתונים של האפליקציה, בלי `LocalSettings.php`, ‏`images` ו-`cache`. ההתקנה הקיימת אינה משתנה |
+
+החיפוש נעשה ב-`PATH` ובתיקיות התקנה נפוצות (למשל XAMPP, WampServer, Laragon ו-`Program Files` ב-Windows;‏ `/usr/bin`, ‏`/usr/sbin`, ‏`/usr/share/mediawiki` ו-Homebrew במערכות אחרות).
+רכיב שהאפליקציה כבר הורידה בעבר ממשיך לשמש גם אם הותקנה בינתיים גרסה במחשב.
+
+משתני סביבה:
+
+| משתנה | תפקיד |
+|-------|-------|
+| `HAMICHLOL_PHP` | נתיב מלא לקובץ ההרצה של PHP |
+| `HAMICHLOL_MYSQLD` | נתיב מלא ל-`mariadbd` / `mysqld` |
+| `HAMICHLOL_MEDIAWIKI_DIR` | תיקיית MediaWiki קיימת |
+| `HAMICHLOL_USE_SYSTEM=false` | לא להשתמש בתוכנות מותקנות, תמיד להוריד |
+
+הורדה אוטומטית של PHP ו-MariaDB קיימת רק ל-Windows. בלינוקס וב-macOS צריך להתקין אותם מראש,
+למשל באובונטו:
+
+```bash
+sudo apt install php-cli php-mysql php-intl php-mbstring php-xml mariadb-server
+```
+
+שימו לב: אם מסד הנתונים נוצר עם שרת בגרסה אחת, ובהמשך השרת המותקן במחשב מוחלף בגרסה ישנה יותר,
+ייתכן שהשרת לא יצליח לפתוח את הנתונים.
+
+## היכן נשמרים הנתונים
+
+השרתים, קבצי MediaWiki ומסד הנתונים נשמרים בתיקיית נתוני המשתמש של האפליקציה
+(`%APPDATA%\hamichlol-offline\data` בחלונות), ולא בתיקיית ההתקנה, שבדרך כלל אינה ניתנת לכתיבה.
+אפשר לשנות את המיקום באמצעות משתנה הסביבה `HAMICHLOL_DATA_DIR`.
+
+```
+data/
+├── server/
+│   ├── php-<גרסה>/        # PHP
+│   └── mariadb-<גרסה>/    # MariaDB
+├── database/              # קבצי מסד הנתונים (נפרד מהגרסה של MariaDB)
+├── mediawiki/             # MediaWiki ו-LocalSettings.php
+└── run-state.json         # תהליכי השרתים שרצים כרגע
+```
+
+השרתים מאזינים רק לכתובת `127.0.0.1`. הפורטים נבחרים מחדש בכל הפעלה,
+ו-`LocalSettings.php` מותאם כך שימשיך לעבוד גם אם הפורטים משתנים.
+
+כשהאפליקציה נפתחת מחדש היא ממשיכה מהשלב שבו עצרה. אם בהפעלה קודמת היא קרסה
+והשאירה שרתים פועלים, הם נעצרים אוטומטית.
+
+## גרסאות ועדכוני אבטחה
+
+הגרסאות וקישורי ההורדה מוגדרים בקובץ אחד: `src/versions.js`.
+כרגע: PHP 8.3, ‏MariaDB 11.8 LTS, ‏MediaWiki 1.43 LTS.
+
+לעדכון גרסה: משנים את מספר הגרסה בקובץ ובודקים שהקישורים זמינים:
+
+```bash
+npm run check-downloads
+```
+
+PHP ו-MariaDB מותקנים בתיקיות לפי גרסה, כך שגרסה חדשה תורד בהפעלה הבאה
+לצד הישנה, ומסד הנתונים נשמר. עדכון גרסת MediaWiki עבור ויקי שכבר מותקן
+עדיין לא נתמך (דורש הרצה של `update.php`).
+
+## בדיקות
+
+```bash
+npm test
+```
+
+הבדיקות רצות במצב פיתוח (`DEV_MODE`) בתיקייה זמנית, ללא הורדות וללא הרצת שרתים אמיתיים.
+
 ## מבנה הפרויקט
 
 ```
@@ -50,14 +127,13 @@ hamichlol-offline/
 ├── src/                    # קוד המקור של האפליקציה
 │   ├── main.js             # תהליך ראשי של Electron
 │   ├── server-manager.js   # ניהול התקנה והפעלת שרתים
+│   ├── system-tools.js     # איתור תוכנות שכבר מותקנות במחשב
+│   ├── versions.js         # גרסאות וקישורי הורדה
 │   └── renderer/           # קבצי ממשק משתמש
 │       └── index.html      # ממשק המשתמש הראשי
-├── resources/              # משאבים עבור האפליקציה
-│   ├── server/             # קבצי שרת (PHP, MySQL)
-│   └── mediawiki/          # קבצי MediaWiki
+├── test/                   # בדיקות
 ├── scripts/                # סקריפטים לאוטומציה
-├── package.json            # הגדרות פרויקט ותלויות
-└── forge.config.js         # תצורת Electron Forge
+└── package.json            # הגדרות פרויקט, תלויות ותצורת electron-builder
 ```
 
 ## רישיון
