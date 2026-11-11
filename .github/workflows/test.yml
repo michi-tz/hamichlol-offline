@@ -44,9 +44,20 @@ jobs:
         run: |
           sudo systemctl stop mysql || true
           sudo apt-get remove --purge -y 'mysql-server*' 'mysql-client*' mysql-common || true
-          sudo apt-get update
-          sudo apt-get install -y --no-install-recommends \
-            php-cli php-mysql php-intl php-mbstring php-xml mariadb-server mediawiki xvfb
+          # The package mirrors are sometimes unreachable for a while, so retry
+          for attempt in 1 2 3 4 5; do
+            if sudo apt-get update -o Acquire::Retries=3 &&
+               sudo apt-get install -y --no-install-recommends -o Acquire::Retries=3 \
+                 php-cli php-mysql php-intl php-mbstring php-xml mariadb-server mediawiki xvfb; then
+              break
+            fi
+            if [ "$attempt" = 5 ]; then
+              echo "::error::Could not install the packages after 5 attempts"
+              exit 1
+            fi
+            echo "Attempt $attempt failed; retrying in 60 seconds"
+            sleep 60
+          done
           sudo systemctl stop mariadb || true
       - run: npm ci
       - name: Flow against the installed software
