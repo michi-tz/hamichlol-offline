@@ -126,6 +126,13 @@ describe('Real installed software', function() {
     expect(getStatus()).to.include({ running: true, phpPort: ports.phpPort, mysqlPort: ports.mysqlPort });
   });
 
+  it('should keep MediaWiki\'s cache inside the app\'s own folder', function() {
+    // Distribution packages default to /var/cache/mediawiki, which only the
+    // web server's user may write to
+    const cache = fs.readdirSync(path.join(getPaths().mediaWikiPath, 'cache'));
+    expect(cache.some(name => name.startsWith('l10n_cache')), cache.join(', ')).to.be.true;
+  });
+
   it('should answer API requests with the configured site', async function() {
     const { query } = await api('action=query&meta=siteinfo&siprop=general');
 

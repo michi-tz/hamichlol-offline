@@ -19,7 +19,10 @@ const {
 const { DOWNLOADS } = require('../src/versions');
 const { setDataPath, getPaths, getStatus, downloadServers, stopServers, _internal } = require('../src/server-manager');
 
-const PHP_INI_DEVELOPMENT = fs.readFileSync(path.join(__dirname, 'fixtures', 'php.ini-development'));
+// Read with Unix line endings whatever the checkout converted them to
+const PHP_INI_DEVELOPMENT = Buffer.from(
+  fs.readFileSync(path.join(__dirname, 'fixtures', 'php.ini-development'), 'utf8').replace(/\r\n/g, '\n')
+);
 function zipOf(entries) {
   const zip = new AdmZip();
   for (const [name, content] of Object.entries(entries)) {

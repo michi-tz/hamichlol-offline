@@ -168,6 +168,11 @@ describe('Server manager building blocks', function() {
 
     const runState = () => JSON.parse(fs.readFileSync(getPaths().runStateFile, 'utf8'));
 
+    // The helper processes are children of this test process, so a killed one
+    // lingers as a zombie (still "alive" to a signal check) until Node has
+    // collected it. Its exit event is the reliable sign that it is gone.
+    const exited = child => waitFor(() => child.exitCode !== null || child.signalCode !== null);
+
     async function startLeftover(marker, { stubborn = false } = {}) {
       const code = stubborn
         ? "process.on('SIGTERM', () => {}); setInterval(() => {}, 1000)"
@@ -189,8 +194,8 @@ describe('Server manager building blocks', function() {
 
       await cleanupStaleProcesses();
 
-      expect(isAlive(php.pid)).to.be.false;
-      expect(isAlive(database.pid)).to.be.false;
+      expect(await exited(php)).to.be.true;
+      expect(await exited(database)).to.be.true;
       expect(fs.existsSync(getPaths().runStateFile)).to.be.false;
     });
 
@@ -203,7 +208,8 @@ describe('Server manager building blocks', function() {
 
       await cleanupStaleProcesses();
 
-      expect(isAlive(php.pid)).to.be.false;
+      expect(await exited(php)).to.be.true;
+      expect(php.signalCode).to.equal('SIGKILL');
       expect(fs.existsSync(getPaths().runStateFile)).to.be.false;
     });
 
@@ -225,7 +231,7 @@ describe('Server manager building blocks', function() {
 
       // Once it can be identified again, the next clean-up finishes the job
       await cleanupStaleProcesses();
-      expect(isAlive(database.pid)).to.be.false;
+      expect(await exited(database)).to.be.true;
       expect(fs.existsSync(getPaths().runStateFile)).to.be.false;
     });
 
@@ -651,14 +657,44 @@ describe('Server manager building blocks', function() {
     ].join('\n');
 
     it('should change only the two settings that depend on ports', function() {
-      const before = GENERATED.split('\n');
-      const after = patch(GENERATED).split('\n');
+      const before = GENERATED.trimEnd().split('\n');
+      const after = patch(GENERATED).split('\n').slice(0, before.length);
 
-      expect(after).to.have.lengthOf(before.length);
       const changed = after.filter((line, index) => line !== before[index]);
       expect(changed).to.have.lengthOf(2);
       expect(changed[0]).to.match(/^\$wgServer = /);
       expect(changed[1]).to.match(/^\$wgDBserver = /);
+    });
+
+    it('should keep the cache and the error logs inside the wiki folder', function() {
+      const settings = patch(GENERATED);
+      const added = settings.slice(settings.indexOf('# Added by Hamichlol Offline'));
+
+      // Distribution packages point these at /var/cache and /var/log, which an
+      // ordinary user cannot write to
+      expect(added).to.include('$wgCacheDirectory = "$IP/cache";');
+      expect(added).to.include('$wgDBerrorLog = "$IP/cache/dberror.log";');
+      expect(added).to.include('$wgDebugLogGroups[$hamichlolLogGroup] = "$IP/cache/$hamichlolLogGroup.log";');
+      // It comes after everything the installer wrote, so it wins
+      expect(settings.indexOf('# Added by Hamichlol Offline')).to.be.above(settings.indexOf('$wgDBpassword'));
+      expect(added).to.not.match(/\/var\//);
+    });
+
+    it('should add that block only once', function() {
+      const twice = patch(patch(GENERATED));
+      expect(twice.match(/# Added by Hamichlol Offline/g)).to.have.lengthOf(1);
+      expect(twice.match(/^\$wgCacheDirectory/gm)).to.have.lengthOf(1);
+    });
+
+    it('should produce valid PHP', function() {
+      const { spawnSync } = require('child_process');
+      if (spawnSync('php', ['-v']).status !== 0) {
+        this.skip(); // no PHP on this computer to check with
+      }
+      patch(GENERATED);
+
+      const check = spawnSync('php', ['-l', path.join(tempDir, 'LocalSettings.php')], { encoding: 'utf8' });
+      expect(check.status, check.stdout + check.stderr).to.equal(0);
     });
 
     it('should not touch similar-looking settings or comments', function() {

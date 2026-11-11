@@ -26,6 +26,7 @@ describe('Application window (dev mode)', function() {
   this.timeout(60000);
 
   let dataDir;
+  let profileDir;
   let app;
   let page;
   let pageErrors;
@@ -33,7 +34,10 @@ describe('Application window (dev mode)', function() {
   async function launch() {
     app = await electron.launch({
       executablePath: require('electron'),
-      args: [...(NO_SANDBOX ? ['--no-sandbox'] : []), APP_DIR],
+      // Its own profile: nothing is written to the profile of a real
+      // installation, and the single-instance lock cannot clash with an app
+      // that is already open. Kept for the whole test, so restarts share it.
+      args: [...(NO_SANDBOX ? ['--no-sandbox'] : []), `--user-data-dir=${profileDir}`, APP_DIR],
       env: { ...process.env, DEV_MODE: 'true', HAMICHLOL_DATA_DIR: dataDir }
     });
     page = await app.firstWindow();
@@ -89,12 +93,14 @@ describe('Application window (dev mode)', function() {
 
   beforeEach(async function() {
     dataDir = makeTempDir('e2e');
+    profileDir = makeTempDir('e2e-profile');
     await launch();
   });
 
   afterEach(async function() {
     await close();
     removeDir(dataDir);
+    removeDir(profileDir);
     expect(pageErrors, 'errors thrown in the page').to.deep.equal([]);
   });
 

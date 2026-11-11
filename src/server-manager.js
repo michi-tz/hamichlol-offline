@@ -585,6 +585,26 @@ function replacePhpSetting(source, name, expression) {
   return source.replace(pattern, () => `$${name} = ${expression};`);
 }
 
+// Distribution packages of MediaWiki (Debian, Ubuntu) point the cache and the
+// error logs at system folders such as /var/cache/mediawiki, which only the
+// web server's user may write to; every page then fails for an ordinary user.
+// This block, appended to LocalSettings.php, keeps them inside the wiki folder.
+const LOCAL_PATHS_MARKER = '# Added by Hamichlol Offline: keep caches and logs inside this folder';
+const LOCAL_PATHS_SETTINGS = [
+  LOCAL_PATHS_MARKER,
+  '$wgCacheDirectory = "$IP/cache";',
+  'if ( $wgDBerrorLog ) {',
+  '\t$wgDBerrorLog = "$IP/cache/dberror.log";',
+  '}',
+  "foreach ( [ 'exception', 'error', 'fatal' ] as $hamichlolLogGroup ) {",
+  '\tif ( isset( $wgDebugLogGroups[$hamichlolLogGroup] ) ) {',
+  '\t\t$wgDebugLogGroups[$hamichlolLogGroup] = "$IP/cache/$hamichlolLogGroup.log";',
+  '\t}',
+  '}',
+  'unset( $hamichlolLogGroup );',
+  ''
+].join('\n');
+
 // Make LocalSettings.php independent of the ports chosen at install time:
 // the server URL is detected per request and the DB port comes from the environment.
 function patchLocalSettings(filePath) {
@@ -595,6 +615,9 @@ function patchLocalSettings(filePath) {
     'wgDBserver',
     `'${LOOPBACK_HOST}:' . ( getenv( '${DB_PORT_ENV}' ) ?: '${DEFAULT_MYSQL_PORT}' )`
   );
+  if (!source.includes(LOCAL_PATHS_MARKER)) {
+    source = `${source.replace(/\s*$/, '')}\n\n${LOCAL_PATHS_SETTINGS}`;
+  }
   fs.writeFileSync(filePath, source);
 }
 
@@ -768,7 +791,11 @@ function assertCanDownload(name, problem) {
 function copyMediaWiki(sourceDir, targetDir) {
   const partialDir = `${targetDir}.partial`;
   // Per-wiki state of the existing installation; a fresh wiki starts without it
-  const skipped = ['LocalSettings.php', 'images', 'cache'].map(name => path.join(sourceDir, name));
+  const skipped = ['LocalSettings.php', 'images', 'cache'];
+  // Compared in one canonical form: on Windows the copy reports paths in a
+  // different spelling from the one it was given
+  const root = path.toNamespacedPath(path.resolve(sourceDir));
+  const isSkipped = source => skipped.includes(path.relative(root, path.toNamespacedPath(path.resolve(source))));
   fs.rmSync(partialDir, { recursive: true, force: true });
 
   try {
@@ -776,7 +803,7 @@ function copyMediaWiki(sourceDir, targetDir) {
       recursive: true,
       // Distribution packages are full of symlinks into other system folders
       dereference: true,
-      filter: source => !skipped.includes(source)
+      filter: source => !isSkipped(source)
     });
     fs.mkdirSync(path.join(partialDir, 'images'), { recursive: true });
     fs.mkdirSync(path.join(partialDir, 'cache'), { recursive: true });
