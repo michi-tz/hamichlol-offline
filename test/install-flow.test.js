@@ -384,6 +384,21 @@ describe('Real installation flow with fake servers', function() {
       expect(queries().slice(-1)).to.deep.equal(['SHUTDOWN']);
     });
 
+    it('should announce a server that exits by itself', async function() {
+      await startServers();
+      const { php } = readJson(getPaths().runStateFile);
+      let changes = 0;
+      const listener = () => { changes += 1; };
+      serverManager.events.on('change', listener);
+      try {
+        process.kill(php.pid, 'SIGKILL');
+        expect(await waitFor(() => changes > 0)).to.be.true;
+        expect(getStatus().running).to.be.false;
+      } finally {
+        serverManager.events.removeListener('change', listener);
+      }
+    });
+
     it('should recover on the next start after the app was killed', async function() {
       await startServers();
       const state = readJson(getPaths().runStateFile);

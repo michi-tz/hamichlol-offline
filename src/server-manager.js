@@ -1,5 +1,6 @@
 const fs = require('fs');
 const os = require('os');
+const { EventEmitter } = require('events');
 const net = require('net');
 const path = require('path');
 const { execFile, spawn } = require('child_process');
@@ -70,6 +71,10 @@ const startingServers = new Map();
 // Server ports (valid while the matching process is running)
 let phpPort = null;
 let mysqlPort = null;
+
+// Emits 'change' when a server process exits, so the UI can follow servers that
+// stop without being asked to (crash, killed from outside)
+const events = new EventEmitter();
 
 function setDataPath(dir) {
   dataPath = dir;
@@ -998,6 +1003,7 @@ async function startMysql() {
       writeRunState();
       stopSurvivor('MySQL', phpProcess);
     }
+    events.emit('change');
   });
   return port;
 }
@@ -1032,6 +1038,7 @@ async function startPhp() {
       writeRunState();
       stopSurvivor('PHP', mysqlProcess);
     }
+    events.emit('change');
   });
   return port;
 }
@@ -1153,15 +1160,20 @@ async function startServers() {
 
       const http = require('http');
       const server = http.createServer((req, res) => {
-        res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' });
+        // Mimic MediaWiki: every page refuses to be shown inside a frame
+        res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8', 'X-Frame-Options': 'DENY' });
+        const otherPage = req.url !== '/';
         res.end(`
           <html dir="rtl" lang="${WIKI_LANGUAGE}">
             <head><meta charset="utf-8"><title>המכלול - אתר בדיקה</title></head>
             <body style="font-family: Arial; direction: rtl; padding: 20px;">
-              <h1>המכלול אופליין - אתר בדיקה</h1>
+              <h1>${otherPage ? 'דף בדיקה' : 'המכלול אופליין - אתר בדיקה'}</h1>
               <p>זהו אתר דמה לצורך בדיקת האפליקציה במצב "על יבש".</p>
               <p>פורט PHP: ${phpPort}</p>
               <p>פורט MySQL: ${mysqlPort}</p>
+              <p><a id="internal-link" href="/index.php?title=Test">דף בדיקה</a></p>
+              <p><a id="external-link" href="https://www.example.org/">קישור חיצוני</a></p>
+              <p><a id="new-window-link" href="https://www.example.org/new" target="_blank">קישור בחלון חדש</a></p>
             </body>
           </html>
         `);
@@ -1258,6 +1270,7 @@ module.exports = {
   dbServerArgs,
   getPaths,
   getStatus,
+  events,
   checkAdminCredentials,
   WIKI_LANGUAGE,
   cleanupStaleProcesses,

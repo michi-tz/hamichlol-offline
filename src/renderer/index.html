@@ -3,221 +3,843 @@
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; img-src 'self' data:">
   <title>המכלול אופליין</title>
   <style>
-    body {
-      font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+    :root {
+      --bg: #f4f6fa;
+      --surface: #ffffff;
+      --surface-muted: #f8fafc;
+      --border: #e2e8f0;
+      --border-strong: #cbd5e1;
+      --text: #0f172a;
+      --text-muted: #64748b;
+      --primary: #1d4ed8;
+      --primary-hover: #1e40af;
+      --primary-soft: #e8effd;
+      --success: #15803d;
+      --success-soft: #e6f4ea;
+      --danger: #b42318;
+      --danger-soft: #fdecea;
+      --danger-border: #f5c2bd;
+      --warning: #b45309;
+      --warning-soft: #fef3e2;
+      --radius: 12px;
+      --radius-sm: 8px;
+      --shadow: 0 1px 2px rgba(15, 23, 42, 0.06), 0 8px 24px rgba(15, 23, 42, 0.06);
+      /* Must match WIKI_BAR_HEIGHT in src/wiki-view.js: the wiki is placed right below the bar */
+      --bar-height: 48px;
+    }
+
+    * { box-sizing: border-box; }
+
+    html, body {
       margin: 0;
-      padding: 20px;
+      height: 100%;
+    }
+
+    body {
+      font-family: 'Segoe UI', 'Noto Sans Hebrew', 'Arial Hebrew', Arial, 'Liberation Sans', sans-serif;
+      font-size: 15px;
+      line-height: 1.5;
+      color: var(--text);
+      background: var(--bg);
       direction: rtl;
-      background-color: #f5f5f5;
     }
-    .container {
-      max-width: 800px;
-      margin: 0 auto;
-      background: white;
-      padding: 20px;
-      border-radius: 8px;
-      box-shadow: 0 2px 10px rgba(0,0,0,0.1);
+
+    button, input { font: inherit; }
+
+    .ltr {
+      direction: ltr;
+      unicode-bidi: isolate;
     }
-    h1, h2 {
-      color: #333;
-      text-align: center;
+
+    /* ---------- Setup screen ---------- */
+
+    .setup {
+      min-height: 100%;
+      display: flex;
+      justify-content: center;
+      padding: 40px 24px 48px;
     }
-    .step {
-      margin-bottom: 20px;
-      padding: 15px;
-      border: 1px solid #ddd;
-      border-radius: 4px;
-      background: #f9f9f9;
+
+    .setup-inner {
+      width: 100%;
+      max-width: 720px;
     }
-    .step h3 {
-      margin-top: 0;
+
+    .brand {
+      display: flex;
+      align-items: center;
+      gap: 16px;
+      margin-bottom: 28px;
     }
-    button {
-      background: #4CAF50;
-      color: white;
-      border: none;
-      padding: 10px 20px;
-      margin: 10px 0;
-      border-radius: 4px;
+
+    .brand-logo {
+      flex: none;
+      width: 52px;
+      height: 52px;
+    }
+
+    .brand h1 {
+      margin: 0;
+      font-size: 26px;
+      line-height: 1.2;
+      letter-spacing: -0.01em;
+    }
+
+    .brand p {
+      margin: 4px 0 0;
+      color: var(--text-muted);
+    }
+
+    .dev-badge {
+      margin-inline-start: auto;
+      align-self: flex-start;
+      padding: 3px 10px;
+      border-radius: 999px;
+      background: var(--warning-soft);
+      color: var(--warning);
+      font-size: 12px;
+      font-weight: 600;
+    }
+
+    /* Step indicator */
+    .stepper {
+      display: flex;
+      list-style: none;
+      margin: 0 0 20px;
+      padding: 0;
+    }
+
+    .stepper li {
+      flex: 1;
+      position: relative;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      gap: 8px;
+      color: var(--text-muted);
+      font-size: 13px;
+      font-weight: 600;
+    }
+
+    /* Connector to the previous step (on the right, in RTL) */
+    .stepper li + li::before {
+      content: '';
+      position: absolute;
+      top: 15px;
+      right: calc(-50% + 22px);
+      left: calc(50% + 22px);
+      height: 2px;
+      background: var(--border-strong);
+      border-radius: 2px;
+    }
+
+    .stepper li.done + li::before { background: var(--primary); }
+
+    .stepper .bullet {
+      width: 32px;
+      height: 32px;
+      border-radius: 50%;
+      display: grid;
+      place-items: center;
+      background: var(--surface);
+      border: 2px solid var(--border-strong);
+      color: var(--text-muted);
+      font-size: 14px;
+      font-weight: 700;
+    }
+
+    .stepper li.current { color: var(--text); }
+    .stepper li.current .bullet {
+      border-color: var(--primary);
+      color: var(--primary);
+      box-shadow: 0 0 0 4px var(--primary-soft);
+    }
+
+    .stepper li.done { color: var(--text); }
+    .stepper li.done .bullet {
+      border-color: var(--primary);
+      background: var(--primary);
+      color: #fff;
+    }
+
+    /* Cards */
+    .card {
+      background: var(--surface);
+      border: 1px solid var(--border);
+      border-radius: var(--radius);
+      box-shadow: var(--shadow);
+      padding: 28px 32px;
+    }
+
+    .step { display: none; }
+    .step.active { display: block; }
+
+    .card h2 {
+      margin: 0 0 6px;
+      font-size: 20px;
+    }
+
+    .card .lead {
+      margin: 0 0 20px;
+      color: var(--text-muted);
+    }
+
+    .actions {
+      display: flex;
+      gap: 12px;
+      align-items: center;
+      margin-top: 24px;
+    }
+
+    /* Buttons */
+    .btn {
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      gap: 8px;
+      min-height: 40px;
+      padding: 8px 20px;
+      border: 1px solid transparent;
+      border-radius: var(--radius-sm);
+      background: var(--primary);
+      color: #fff;
+      font-weight: 600;
       cursor: pointer;
+      transition: background-color 0.15s, border-color 0.15s, box-shadow 0.15s;
+    }
+
+    .btn:hover:not(:disabled) { background: var(--primary-hover); }
+    .btn:focus-visible { outline: none; box-shadow: 0 0 0 3px rgba(29, 78, 216, 0.35); }
+    .btn:disabled { opacity: 0.55; cursor: not-allowed; }
+
+    .btn-large {
+      min-height: 46px;
+      padding: 10px 28px;
       font-size: 16px;
-      transition: background 0.3s;
     }
-    button:hover {
-      background: #45a049;
+
+    .btn-secondary {
+      background: var(--surface);
+      color: var(--text);
+      border-color: var(--border-strong);
     }
-    button:disabled {
-      background: #cccccc;
-      cursor: not-allowed;
+    .btn-secondary:hover:not(:disabled) { background: var(--surface-muted); }
+
+    .btn-danger {
+      background: var(--surface);
+      color: var(--danger);
+      border-color: var(--danger-border);
     }
-    .form-group {
-      margin-bottom: 15px;
+    .btn-danger:hover:not(:disabled) { background: var(--danger-soft); }
+
+    .btn .spinner { display: none; }
+    .btn.loading .spinner { display: inline-block; }
+
+    .spinner {
+      width: 16px;
+      height: 16px;
+      flex: none;
+      border: 2px solid currentColor;
+      border-top-color: transparent;
+      border-radius: 50%;
+      animation: spin 0.8s linear infinite;
     }
+
+    @keyframes spin { to { transform: rotate(360deg); } }
+
+    /* Components list (step 1) */
+    .tools-list {
+      list-style: none;
+      margin: 0;
+      padding: 0;
+      border: 1px solid var(--border);
+      border-radius: var(--radius-sm);
+      overflow: hidden;
+    }
+
+    .tools-list li {
+      display: grid;
+      grid-template-columns: auto 1fr auto;
+      grid-template-areas:
+        "icon name badge"
+        "icon text badge";
+      column-gap: 14px;
+      align-items: center;
+      padding: 14px 16px;
+      background: var(--surface);
+    }
+
+    .tools-list li + li { border-top: 1px solid var(--border); }
+
+    .tools-list .tool-icon {
+      grid-area: icon;
+      width: 36px;
+      height: 36px;
+      border-radius: 8px;
+      display: grid;
+      place-items: center;
+      background: var(--primary-soft);
+      color: var(--primary);
+      font-size: 12px;
+      font-weight: 700;
+    }
+
+    .tools-list strong { grid-area: name; }
+    .tools-list .tool-text { grid-area: text; color: var(--text-muted); font-size: 14px; }
+
+    .tools-list .tool-path {
+      display: block;
+      margin-top: 2px;
+      color: var(--text-muted);
+      font-size: 12px;
+      text-align: right;
+      overflow-wrap: anywhere;
+    }
+
+    .tools-list .tool-problem {
+      display: block;
+      margin-top: 4px;
+      color: var(--danger);
+      font-size: 13px;
+    }
+
+    .badge {
+      grid-area: badge;
+      padding: 3px 10px;
+      border-radius: 999px;
+      font-size: 12px;
+      font-weight: 600;
+      white-space: nowrap;
+    }
+
+    .badge-ready { background: var(--success-soft); color: var(--success); }
+    .badge-download { background: var(--primary-soft); color: var(--primary); }
+    .badge-missing { background: var(--danger-soft); color: var(--danger); }
+
+    /* Settings form (step 2) */
+    fieldset {
+      margin: 0 0 20px;
+      padding: 0;
+      border: none;
+    }
+
+    legend {
+      padding: 0;
+      margin-bottom: 12px;
+      font-size: 13px;
+      font-weight: 700;
+      color: var(--text-muted);
+      letter-spacing: 0.02em;
+    }
+
+    .form-grid {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 16px 20px;
+    }
+
+    .form-group.wide { grid-column: 1 / -1; }
+
     label {
       display: block;
-      margin-bottom: 5px;
-      font-weight: bold;
-    }
-    input {
-      width: 100%;
-      padding: 8px;
-      box-sizing: border-box;
-      border: 1px solid #ddd;
-      border-radius: 4px;
-    }
-    .status {
-      margin-top: 20px;
-      padding: 10px;
-      border-radius: 4px;
-      background: #f0f0f0;
-      text-align: center;
-    }
-    .tools-list {
-      padding: 0;
-      list-style: none;
-    }
-    .tools-list li {
       margin-bottom: 6px;
+      font-weight: 600;
+      font-size: 14px;
     }
-    .tools-list .tool-path {
-      color: #666;
-      font-size: 13px;
-      direction: ltr;
-      unicode-bidi: embed;
-    }
-    .tools-list .tool-problem {
-      color: #b00020;
-      font-size: 13px;
-    }
-    .browser-frame {
+
+    input[type="text"], input[type="password"] {
       width: 100%;
-      height: 500px;
+      height: 40px;
+      padding: 8px 12px;
+      border: 1px solid var(--border-strong);
+      border-radius: var(--radius-sm);
+      background: var(--surface);
+      color: var(--text);
+      transition: border-color 0.15s, box-shadow 0.15s;
+    }
+
+    input:focus {
+      outline: none;
+      border-color: var(--primary);
+      box-shadow: 0 0 0 3px rgba(29, 78, 216, 0.18);
+    }
+
+    input.invalid { border-color: var(--danger); }
+    input.invalid:focus { box-shadow: 0 0 0 3px rgba(180, 35, 24, 0.15); }
+
+    .hint {
+      margin: 6px 0 0;
+      font-size: 13px;
+      color: var(--text-muted);
+      min-height: 1em;
+    }
+
+    .hint.error { color: var(--danger); }
+
+    .password-field { position: relative; }
+    .password-field input { padding-inline-end: 64px; }
+
+    .toggle-password {
+      position: absolute;
+      top: 4px;
+      bottom: 4px;
+      inset-inline-end: 4px;
+      padding: 0 10px;
       border: none;
-      margin-top: 20px;
-      border: 1px solid #ddd;
-      border-radius: 4px;
+      border-radius: 6px;
+      background: transparent;
+      color: var(--primary);
+      font-size: 13px;
+      font-weight: 600;
+      cursor: pointer;
+    }
+    .toggle-password:hover { background: var(--primary-soft); }
+
+    .rules {
+      list-style: none;
+      margin: 8px 0 0;
+      padding: 0;
+      display: grid;
+      gap: 2px;
+      font-size: 13px;
+    }
+
+    .rules li {
+      display: flex;
+      align-items: center;
+      gap: 6px;
+      color: var(--text-muted);
+    }
+
+    .rules .mark {
+      width: 16px;
+      height: 16px;
+      flex: none;
+      border-radius: 50%;
+      display: grid;
+      place-items: center;
+      font-size: 11px;
+      line-height: 1;
+      background: var(--border);
+      color: var(--text-muted);
+    }
+
+    .rules li.ok { color: var(--success); }
+    .rules li.ok .mark { background: var(--success); color: #fff; }
+    .rules li.fail { color: var(--danger); }
+    .rules li.fail .mark { background: var(--danger); color: #fff; }
+
+    /* Ready screen (step 3) */
+    .ready {
+      text-align: center;
+      padding: 12px 0 4px;
+    }
+
+    .ready-icon {
+      width: 64px;
+      height: 64px;
+      margin: 0 auto 16px;
+      border-radius: 50%;
+      display: grid;
+      place-items: center;
+      background: var(--success-soft);
+      color: var(--success);
+    }
+
+    .ready .actions { justify-content: center; }
+
+    /* Status line */
+    .status {
+      display: flex;
+      align-items: flex-start;
+      gap: 10px;
+      margin-top: 16px;
+      padding: 12px 16px;
+      border-radius: var(--radius-sm);
+      background: var(--surface);
+      border: 1px solid var(--border);
+      color: var(--text-muted);
+      font-size: 14px;
+      white-space: pre-line;
+    }
+
+    .status .spinner, .status .status-icon { display: none; margin-top: 2px; }
+    .status.busy { color: var(--primary); border-color: #c7d6f8; background: var(--primary-soft); }
+    .status.busy .spinner { display: inline-block; }
+    .status.error { color: var(--danger); border-color: var(--danger-border); background: var(--danger-soft); }
+    .status.error .status-icon { display: inline-block; }
+    .status.success { color: var(--success); border-color: #bfe3c9; background: var(--success-soft); }
+
+    .status-icon {
+      width: 18px;
+      height: 18px;
+      flex: none;
+    }
+
+    /* ---------- Wiki mode: only a slim bar above the wiki ---------- */
+
+    .wiki-bar {
       display: none;
+      position: fixed;
+      inset: 0 0 auto 0;
+      height: var(--bar-height);
+      align-items: center;
+      gap: 6px;
+      padding: 0 12px;
+      background: var(--surface);
+      border-bottom: 1px solid var(--border);
+      user-select: none;
+    }
+
+    body.wiki-mode { overflow: hidden; }
+    body.wiki-mode .setup { display: none; }
+    body.wiki-mode .wiki-bar { display: flex; }
+
+    .bar-brand {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      font-weight: 700;
+      font-size: 14px;
+      white-space: nowrap;
+      margin-inline-end: 6px;
+    }
+
+    .bar-brand svg { width: 26px; height: 26px; }
+
+    .bar-divider {
+      width: 1px;
+      height: 24px;
+      background: var(--border);
+      margin: 0 4px;
+    }
+
+    .icon-btn {
+      width: 34px;
+      height: 34px;
+      display: inline-grid;
+      place-items: center;
+      padding: 0;
+      border: none;
+      border-radius: 8px;
+      background: transparent;
+      color: #334155;
+      cursor: pointer;
+    }
+
+    .icon-btn:hover:not(:disabled) { background: #eef2f7; }
+    .icon-btn:disabled { color: #b6c0cd; cursor: default; }
+    .icon-btn svg { width: 18px; height: 18px; }
+
+    .bar-title {
+      flex: 1;
+      min-width: 0;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+      color: var(--text-muted);
+      font-size: 13px;
+      padding: 0 6px;
+    }
+
+    .bar-status {
+      display: flex;
+      align-items: center;
+      gap: 6px;
+      padding: 4px 10px;
+      border-radius: 999px;
+      background: var(--success-soft);
+      color: var(--success);
+      font-size: 12px;
+      font-weight: 600;
+      white-space: nowrap;
+    }
+
+    .bar-status .dot {
+      width: 8px;
+      height: 8px;
+      border-radius: 50%;
+      background: currentColor;
+      box-shadow: 0 0 0 3px rgba(21, 128, 61, 0.15);
+    }
+
+    .wiki-bar .btn {
+      min-height: 32px;
+      padding: 4px 14px;
+      font-size: 13px;
+    }
+
+    @media (max-width: 720px) {
+      .form-grid { grid-template-columns: 1fr; }
+      .card { padding: 22px 20px; }
+      .setup { padding: 24px 16px 32px; }
+    }
+
+    @media (prefers-reduced-motion: reduce) {
+      .spinner { animation-duration: 2.4s; }
     }
   </style>
 </head>
 <body>
-  <div class="container">
-    <h1>המכלול אופליין</h1>
-    <p>מערכת מקומית להרצת מדיה-ויקי ללא צורך בחיבור לאינטרנט</p>
-    
-    <div class="step" id="step1">
-      <h3>שלב 1: התקנת שרתים</h3>
-      <p>נדרשים PHP, שרת מסד נתונים (MariaDB או MySQL) ומדיה ויקי. תוכנות שכבר מותקנות במחשב ישמשו כמות שהן, והשאר יורדו.</p>
-      <ul id="toolsList" class="tools-list"></ul>
-      <button id="downloadBtn">התקן שרתים</button>
+  <!-- The logo, used by the setup screen and the wiki bar. Not display:none:
+       that would also hide its gradient wherever it is used. -->
+  <svg width="0" height="0" style="position: absolute" aria-hidden="true">
+    <defs>
+      <linearGradient id="logoGradient" x1="0" y1="0" x2="1" y2="1">
+        <stop offset="0" stop-color="#2563eb"/>
+        <stop offset="1" stop-color="#1e3a8a"/>
+      </linearGradient>
+      <symbol id="logo" viewBox="0 0 52 52">
+        <rect width="52" height="52" rx="13" fill="url(#logoGradient)"/>
+        <path d="M12 16.5c4.5-1.6 9-1.2 14 1.6v19.4c-5-2.8-9.5-3.2-14-1.6z" fill="#fff" opacity="0.95"/>
+        <path d="M40 16.5c-4.5-1.6-9-1.2-14 1.6v19.4c5-2.8 9.5-3.2 14-1.6z" fill="#fff" opacity="0.75"/>
+      </symbol>
+    </defs>
+  </svg>
+
+  <!-- Shown above the wiki while the servers run; the wiki itself is a separate,
+       sandboxed view placed below this bar by the main process -->
+  <header class="wiki-bar" id="wikiBar">
+    <div class="bar-brand">
+      <svg viewBox="0 0 52 52" aria-hidden="true"><use href="#logo"></use></svg>
+      <span>המכלול אופליין</span>
     </div>
-    
-    <div class="step" id="step2">
-      <h3>שלב 2: הגדרת MediaWiki</h3>
-      <form id="wikiSetupForm">
-        <div class="form-group">
-          <label for="dbName">שם מסד הנתונים:</label>
-          <input type="text" id="dbName" value="wikidb" pattern="[A-Za-z0-9_]{1,64}" title="אותיות לטיניות, ספרות וקו תחתון בלבד" required>
+    <button type="button" class="icon-btn" id="wikiBackBtn" title="אחורה" aria-label="אחורה">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M9 6l6 6-6 6"/></svg>
+    </button>
+    <button type="button" class="icon-btn" id="wikiForwardBtn" title="קדימה" aria-label="קדימה">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M15 6l-6 6 6 6"/></svg>
+    </button>
+    <button type="button" class="icon-btn" id="wikiReloadBtn" title="רענון" aria-label="רענון">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M20 12a8 8 0 1 1-2.34-5.66"/><path d="M20 4v5h-5"/></svg>
+    </button>
+    <button type="button" class="icon-btn" id="wikiHomeBtn" title="עמוד ראשי" aria-label="עמוד ראשי">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M4 11l8-7 8 7"/><path d="M6 9.5V20h12V9.5"/></svg>
+    </button>
+    <div class="bar-title" id="wikiTitle"></div>
+    <div class="bar-status" id="serversIndicator"><span class="dot"></span><span>השרתים פועלים</span></div>
+    <button type="button" class="icon-btn" id="wikiExternalBtn" title="פתח בדפדפן חיצוני" aria-label="פתח בדפדפן חיצוני">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M14 4h6v6"/><path d="M20 4l-9 9"/><path d="M18 14v5a1 1 0 0 1-1 1H5a1 1 0 0 1-1-1V7a1 1 0 0 1 1-1h5"/></svg>
+    </button>
+    <span class="bar-divider"></span>
+    <button type="button" class="btn btn-danger" id="stopServersBtn">
+      <span class="spinner" aria-hidden="true"></span>
+      <span>עצור שרתים</span>
+    </button>
+  </header>
+
+  <main class="setup">
+    <div class="setup-inner">
+      <header class="brand">
+        <svg class="brand-logo" viewBox="0 0 52 52" aria-hidden="true"><use href="#logo"></use></svg>
+        <div>
+          <h1>המכלול אופליין</h1>
+          <p>אתר המכלול במחשב שלך, גם בלי חיבור לאינטרנט</p>
         </div>
-        <div class="form-group">
-          <label for="dbUser">שם משתמש למסד נתונים:</label>
-          <input type="text" id="dbUser" value="wikiuser" pattern="[A-Za-z0-9_]{1,32}" title="אותיות לטיניות, ספרות וקו תחתון בלבד, עד 32 תווים" required>
+        <span class="dev-badge" id="devBadge" hidden>מצב פיתוח</span>
+      </header>
+
+      <ol class="stepper" id="stepper" aria-label="שלבי ההתקנה">
+        <li data-step="1"><span class="bullet">1</span><span>התקנת שרתים</span></li>
+        <li data-step="2"><span class="bullet">2</span><span>הגדרת הוויקי</span></li>
+        <li data-step="3"><span class="bullet">3</span><span>הפעלה</span></li>
+      </ol>
+
+      <section class="card step" id="step1" aria-labelledby="step1Title">
+        <h2 id="step1Title">התקנת שרתים</h2>
+        <p class="lead">נדרשים PHP, שרת מסד נתונים (MariaDB או MySQL) ומדיה ויקי. תוכנות שכבר מותקנות במחשב ישמשו כמות שהן, והשאר יורדו.</p>
+        <ul id="toolsList" class="tools-list"></ul>
+        <div class="actions">
+          <button type="button" class="btn btn-large" id="downloadBtn">
+            <span class="spinner" aria-hidden="true"></span>
+            <span>התקן שרתים</span>
+          </button>
         </div>
-        <div class="form-group">
-          <label for="dbPassword">סיסמה למסד נתונים:</label>
-          <input type="password" id="dbPassword" required>
+      </section>
+
+      <section class="card step" id="step2" aria-labelledby="step2Title">
+        <h2 id="step2Title">הגדרת הוויקי</h2>
+        <p class="lead">הוויקי יותקן בעברית. את הסיסמאות כדאי לשמור במקום בטוח: אין דרך לשחזר אותן מתוך האפליקציה.</p>
+        <form id="wikiSetupForm" novalidate>
+          <fieldset>
+            <legend>האתר ומנהל האתר</legend>
+            <div class="form-grid">
+              <div class="form-group wide">
+                <label for="wikiName">שם האתר</label>
+                <input type="text" id="wikiName" value="המכלול אופליין" required>
+              </div>
+              <div class="form-group">
+                <label for="adminUser">שם משתמש מנהל</label>
+                <input type="text" id="adminUser" value="admin" required autocomplete="username" aria-describedby="adminUserHint">
+                <p class="hint" id="adminUserHint"></p>
+              </div>
+              <div class="form-group">
+                <label for="adminPassword">סיסמת מנהל</label>
+                <div class="password-field">
+                  <input type="password" id="adminPassword" required autocomplete="new-password" aria-describedby="adminPasswordRules">
+                  <button type="button" class="toggle-password" data-target="adminPassword" aria-pressed="false">הצג</button>
+                </div>
+                <ul class="rules" id="adminPasswordRules" aria-live="polite"></ul>
+              </div>
+            </div>
+          </fieldset>
+          <fieldset>
+            <legend>מסד הנתונים</legend>
+            <div class="form-grid">
+              <div class="form-group">
+                <label for="dbName">שם מסד הנתונים</label>
+                <input type="text" id="dbName" value="wikidb" pattern="[A-Za-z0-9_]{1,64}" title="אותיות לטיניות, ספרות וקו תחתון בלבד" required>
+              </div>
+              <div class="form-group">
+                <label for="dbUser">שם משתמש למסד הנתונים</label>
+                <input type="text" id="dbUser" value="wikiuser" pattern="[A-Za-z0-9_]{1,32}" title="אותיות לטיניות, ספרות וקו תחתון בלבד, עד 32 תווים" required>
+              </div>
+              <div class="form-group wide">
+                <label for="dbPassword">סיסמה למסד הנתונים</label>
+                <div class="password-field">
+                  <input type="password" id="dbPassword" required autocomplete="new-password">
+                  <button type="button" class="toggle-password" data-target="dbPassword" aria-pressed="false">הצג</button>
+                </div>
+              </div>
+            </div>
+          </fieldset>
+          <div class="actions">
+            <button type="submit" class="btn btn-large">
+              <span class="spinner" aria-hidden="true"></span>
+              <span>התקן MediaWiki</span>
+            </button>
+          </div>
+        </form>
+      </section>
+
+      <section class="card step" id="step3" aria-labelledby="step3Title">
+        <div class="ready">
+          <div class="ready-icon">
+            <svg width="32" height="32" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M5 12.5l4.5 4.5L19 7.5"/></svg>
+          </div>
+          <h2 id="step3Title">הוויקי מותקן ומוכן</h2>
+          <p class="lead">הפעל את השרתים כדי לפתוח את אתר המכלול המקומי. הוויקי יוצג בחלון הזה, ואפשר לעצור את השרתים בכל רגע מהסרגל העליון או מתפריט "שרתים".</p>
+          <div class="actions">
+            <button type="button" class="btn btn-large" id="startServersBtn">
+              <span class="spinner" aria-hidden="true"></span>
+              <span>הפעל שרתים</span>
+            </button>
+          </div>
         </div>
-        <div class="form-group">
-          <label for="wikiName">שם האתר:</label>
-          <input type="text" id="wikiName" value="המכלול אופליין" required>
-        </div>
-        <div class="form-group">
-          <label for="adminUser">שם משתמש מנהל:</label>
-          <input type="text" id="adminUser" value="admin" required>
-        </div>
-        <div class="form-group">
-          <label for="adminPassword">סיסמת מנהל (לפחות 10 תווים):</label>
-          <input type="password" id="adminPassword" minlength="10" required>
-        </div>
-        <button type="submit">התקן MediaWiki</button>
-      </form>
+      </section>
+
+      <div class="status" id="status" role="status" aria-live="polite">
+        <span class="spinner" aria-hidden="true"></span>
+        <svg class="status-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true"><circle cx="12" cy="12" r="9"/><path d="M12 7.5v5.5"/><path d="M12 16.5v.01"/></svg>
+        <span id="statusText">ממתין להתקנה...</span>
+      </div>
     </div>
-    
-    <div class="step" id="step3">
-      <h3>שלב 3: הפעלת השרתים</h3>
-      <p>הפעל את השרתים לגישה לאתר המכלול המקומי</p>
-      <button id="startServersBtn">הפעל שרתים</button>
-      <button id="stopServersBtn">עצור שרתים</button>
-    </div>
-    
-    <div class="status" id="status">סטטוס: ממתין להתקנה...</div>
-    
-    <iframe id="wikiBrowser" class="browser-frame"></iframe>
-  </div>
+  </main>
 
   <script>
     const { ipcRenderer } = require('electron');
 
     // Elements
     const downloadBtn = document.getElementById('downloadBtn');
-    const step1 = document.getElementById('step1');
-    const step2 = document.getElementById('step2');
-    const step3 = document.getElementById('step3');
+    const steps = [1, 2, 3].map(number => document.getElementById(`step${number}`));
+    const stepperItems = [...document.querySelectorAll('#stepper li')];
     const wikiSetupForm = document.getElementById('wikiSetupForm');
     const installBtn = wikiSetupForm.querySelector('button[type="submit"]');
     const startServersBtn = document.getElementById('startServersBtn');
     const stopServersBtn = document.getElementById('stopServersBtn');
     const statusEl = document.getElementById('status');
-    const wikiBrowser = document.getElementById('wikiBrowser');
+    const statusText = document.getElementById('statusText');
     const toolsList = document.getElementById('toolsList');
+    const devBadge = document.getElementById('devBadge');
+    const adminUserInput = document.getElementById('adminUser');
+    const adminUserHint = document.getElementById('adminUserHint');
+    const adminPasswordInput = document.getElementById('adminPassword');
+    const adminPasswordRules = document.getElementById('adminPasswordRules');
+    const wikiTitle = document.getElementById('wikiTitle');
+    const wikiButtons = {
+      back: document.getElementById('wikiBackBtn'),
+      forward: document.getElementById('wikiForwardBtn'),
+      reload: document.getElementById('wikiReloadBtn'),
+      home: document.getElementById('wikiHomeBtn'),
+      external: document.getElementById('wikiExternalBtn')
+    };
 
-    function setStatus(message) {
-      statusEl.textContent = `סטטוס: ${message}`;
-    }
+    // What the main process is doing, as last reported
+    let state = null;
+    let busyMessage = null;
 
-    function showWiki(phpPort) {
-      wikiBrowser.src = `http://127.0.0.1:${phpPort}`;
-      wikiBrowser.style.display = 'block';
-    }
+    const ERROR_PREFIXES = {
+      download: 'שגיאה בהתקנת השרתים',
+      install: 'שגיאה בהתקנת MediaWiki',
+      start: 'שגיאה בהפעלת השרתים',
+      stop: 'שגיאה בכיבוי השרתים',
+      restart: 'שגיאה בהפעלה מחדש של השרתים',
+      crash: 'שגיאה'
+    };
 
-    function hideWiki() {
-      wikiBrowser.style.display = 'none';
-      wikiBrowser.src = 'about:blank';
+    const BUSY_MESSAGES = {
+      download: 'מכין שרתים...',
+      install: 'מתקין MediaWiki...',
+      start: 'מפעיל שרתים...',
+      stop: 'מכבה שרתים...',
+      restart: 'מפעיל מחדש את השרתים...'
+    };
+
+    // kind: 'idle', 'busy', 'error' or 'success'
+    function setStatus(message, kind = 'idle') {
+      statusText.textContent = message;
+      statusEl.className = `status ${kind}`;
     }
 
     // One line per component: taken from the computer, already downloaded, or still to download.
     function describeTool(name, tool, downloadVersion, canDownload) {
       const item = document.createElement('li');
+      const icon = document.createElement('span');
+      icon.className = 'tool-icon';
+      icon.setAttribute('aria-hidden', 'true');
+      icon.textContent = name === 'MediaWiki' ? 'MW' : name === 'PHP' ? 'PHP' : 'DB';
       const title = document.createElement('strong');
-      title.textContent = `${name}: `;
-      item.appendChild(title);
+      title.textContent = name;
+      item.append(title);
 
+      const textEl = document.createElement('span');
+      textEl.className = 'tool-text';
       let text;
+      let badge;
       if (tool.source === 'system') {
         text = `גרסה ${tool.version} שמותקנת במחשב `;
+        badge = ['מותקן במחשב', 'badge-ready'];
       } else if (tool.source === 'bundled' || tool.source === 'installed') {
         text = `גרסה ${tool.version || downloadVersion} כבר הורדה `;
+        badge = ['מוכן', 'badge-ready'];
       } else if (canDownload) {
         text = `תורד גרסה ${downloadVersion} `;
+        badge = ['יורד', 'badge-download'];
       } else {
         text = 'לא נמצא במחשב. יש להתקין אותו ואז ללחוץ על הכפתור ';
+        badge = ['חסר', 'badge-missing'];
       }
-      item.appendChild(document.createTextNode(text));
+      textEl.append(text);
 
       if (tool.source && tool.path) {
         const pathEl = document.createElement('span');
-        pathEl.className = 'tool-path';
+        pathEl.className = 'tool-path ltr';
         pathEl.textContent = tool.path;
-        item.appendChild(pathEl);
+        textEl.append(pathEl);
       }
       if (!tool.source && tool.problem) {
-        const problemEl = document.createElement('div');
+        const problemEl = document.createElement('span');
         problemEl.className = 'tool-problem';
         problemEl.textContent = `נמצאה התקנה שאינה מתאימה: ${tool.problem}`;
-        item.appendChild(problemEl);
+        textEl.append(problemEl);
       }
+      const badgeEl = document.createElement('span');
+      badgeEl.className = `badge ${badge[1]}`;
+      badgeEl.textContent = badge[0];
+      item.append(textEl, badgeEl, icon);
       return item;
     }
 
@@ -235,137 +857,209 @@
       );
     }
 
-    // Show only the step that matches what has already been done, so the app
-    // resumes where it left off after a restart.
-    async function refreshView() {
-      const status = await ipcRenderer.invoke('get-status');
-      showTools(status);
-
-      step1.style.display = status.downloaded ? 'none' : 'block';
-      step2.style.display = status.downloaded && !status.installed ? 'block' : 'none';
-      step3.style.display = status.downloaded && status.installed ? 'block' : 'none';
-
-      downloadBtn.disabled = false;
-      installBtn.disabled = false;
-      startServersBtn.disabled = status.running;
-      stopServersBtn.disabled = !status.running;
-
-      if (status.running) {
-        setStatus(`השרתים פועלים (PHP: ${status.phpPort}, MySQL: ${status.mysqlPort})`);
-        showWiki(status.phpPort);
-      } else {
-        hideWiki();
-        if (!status.downloaded) {
-          setStatus('ממתין להתקנה...');
-        } else if (!status.installed) {
-          setStatus('השרתים מוכנים. יש להגדיר את MediaWiki');
-        } else {
-          setStatus('המערכת מותקנת. אפשר להפעיל את השרתים');
-        }
-      }
-
-      return status;
+    function setLoading(button, loading) {
+      button.classList.toggle('loading', loading);
     }
 
-    // Status updates
-    ipcRenderer.on('status-update', (event, message) => {
-      setStatus(message);
-    });
+    // Draw the page for `newState` (from the main process). Shows only the step
+    // that matches what has already been done, so the app resumes where it left
+    // off after a restart, and switches to the wiki once the servers run.
+    function render(newState) {
+      state = newState;
+      const { busy, error, running } = state;
+      showTools(state);
+      devBadge.hidden = !state.devMode;
 
-    // Step 1: Download servers
-    downloadBtn.addEventListener('click', async () => {
-      downloadBtn.disabled = true;
-      setStatus('מכין שרתים...');
+      document.body.classList.toggle('wiki-mode', running);
 
-      try {
-        const result = await ipcRenderer.invoke('download-servers');
-        if (result.success) {
-          await refreshView();
+      const current = !state.downloaded ? 1 : !state.installed ? 2 : 3;
+      steps.forEach((step, index) => step.classList.toggle('active', index + 1 === current));
+      stepperItems.forEach((item, index) => {
+        const number = index + 1;
+        item.classList.toggle('done', number < current || (number === 3 && running));
+        item.classList.toggle('current', number === current);
+        item.querySelector('.bullet').textContent = number < current ? '✓' : String(number);
+        if (number === current) {
+          item.setAttribute('aria-current', 'step');
         } else {
-          setStatus(`שגיאה בהתקנת השרתים - ${result.error}`);
-          downloadBtn.disabled = false;
+          item.removeAttribute('aria-current');
         }
-      } catch (error) {
-        setStatus(`שגיאה - ${error.message}`);
-        downloadBtn.disabled = false;
+      });
+
+      downloadBtn.disabled = Boolean(busy);
+      installBtn.disabled = Boolean(busy);
+      startServersBtn.disabled = Boolean(busy) || running;
+      stopServersBtn.disabled = Boolean(busy) || !running;
+      setLoading(downloadBtn, busy === 'download');
+      setLoading(installBtn, busy === 'install');
+      setLoading(startServersBtn, busy === 'start' || busy === 'restart');
+      setLoading(stopServersBtn, busy === 'stop' || busy === 'restart');
+
+      const indicator = document.getElementById('serversIndicator');
+      indicator.title = running ? `PHP: ${state.phpPort}, MySQL: ${state.mysqlPort}` : '';
+
+      if (busy) {
+        setStatus(busyMessage || BUSY_MESSAGES[busy] || 'עובד...', 'busy');
+      } else if (error) {
+        setStatus(`${ERROR_PREFIXES[error.action] || 'שגיאה'}: ${error.message}`, 'error');
+      } else if (running) {
+        setStatus(`השרתים פועלים (PHP: ${state.phpPort}, MySQL: ${state.mysqlPort})`, 'success');
+      } else if (!state.downloaded) {
+        setStatus('ממתין להתקנה...');
+      } else if (!state.installed) {
+        setStatus('השרתים מוכנים. יש להגדיר את MediaWiki');
+      } else {
+        setStatus('המערכת מותקנת. אפשר להפעיל את השרתים');
+      }
+      if (!busy) {
+        busyMessage = null;
+      }
+      return state;
+    }
+
+    // Ask the main process for the current state and draw it
+    async function refreshView(newState) {
+      return render(newState || await ipcRenderer.invoke('get-status'));
+    }
+
+    // Progress messages of the operation that is running
+    ipcRenderer.on('status-update', (event, message) => {
+      busyMessage = message;
+      if (state && state.busy) {
+        setStatus(message, 'busy');
       }
     });
+
+    // The main process changed something (also through the menu, or because a
+    // server stopped by itself)
+    ipcRenderer.on('state-changed', (event, newState) => {
+      refreshView(newState);
+    });
+
+    // The page shown in the wiki
+    function showWikiPage(info) {
+      wikiTitle.textContent = info && info.title ? info.title : '';
+      wikiButtons.back.disabled = !(info && info.canGoBack);
+      wikiButtons.forward.disabled = !(info && info.canGoForward);
+    }
+    ipcRenderer.on('wiki-changed', (event, info) => showWikiPage(info));
+
+    for (const [where, button] of Object.entries(wikiButtons)) {
+      button.addEventListener('click', async () => {
+        showWikiPage(await ipcRenderer.invoke('wiki-navigate', where));
+      });
+    }
+
+    // Run an operation of the main process. Its progress and result arrive as
+    // 'state-changed' events, which redraw the page.
+    async function runOperation(channel, ...args) {
+      try {
+        return await ipcRenderer.invoke(channel, ...args);
+      } catch (error) {
+        setStatus(`שגיאה: ${error.message}`, 'error');
+        return { success: false, error: error.message };
+      }
+    }
+
+    // Step 1: Download servers
+    downloadBtn.addEventListener('click', () => runOperation('download-servers'));
+
+    // Administrator name and password: checked by the main process with the
+    // same rules the installation uses, while the user types
+    let adminCheck = 0;
+    async function checkAdminCredentials() {
+      const check = ++adminCheck;
+      const result = await ipcRenderer.invoke('check-admin-credentials', {
+        adminUser: adminUserInput.value,
+        adminPassword: adminPasswordInput.value
+      });
+      if (check !== adminCheck) {
+        return null; // an answer to an older value
+      }
+
+      const user = adminUserInput.value.trim();
+      adminUserInput.setCustomValidity(user ? result.usernameError || '' : '');
+      adminUserInput.classList.toggle('invalid', Boolean(user && result.usernameError));
+      adminUserHint.classList.toggle('error', Boolean(user && result.usernameError));
+      if (user && result.usernameError) {
+        adminUserHint.textContent = result.usernameError;
+      } else if (result.canonicalUsername && result.canonicalUsername !== user) {
+        adminUserHint.textContent = `השם יישמר כ-${result.canonicalUsername}`;
+      } else {
+        adminUserHint.textContent = '';
+      }
+
+      const password = adminPasswordInput.value;
+      adminPasswordInput.setCustomValidity(password ? result.passwordError || '' : '');
+      adminPasswordInput.classList.toggle('invalid', Boolean(password && result.passwordError));
+      adminPasswordRules.replaceChildren(...result.passwordRules.map(rule => {
+        const item = document.createElement('li');
+        item.dataset.rule = rule.id;
+        const known = password && !rule.skipped;
+        item.className = !known ? 'pending' : rule.ok ? 'ok' : 'fail';
+        const mark = document.createElement('span');
+        mark.className = 'mark';
+        mark.setAttribute('aria-hidden', 'true');
+        mark.textContent = !known ? '•' : rule.ok ? '✓' : '✗';
+        item.append(mark, rule.label);
+        return item;
+      }));
+      return result;
+    }
+
+    adminUserInput.addEventListener('input', checkAdminCredentials);
+    adminPasswordInput.addEventListener('input', checkAdminCredentials);
+
+    for (const toggle of document.querySelectorAll('.toggle-password')) {
+      toggle.addEventListener('click', () => {
+        const input = document.getElementById(toggle.dataset.target);
+        const show = input.type === 'password';
+        input.type = show ? 'text' : 'password';
+        toggle.textContent = show ? 'הסתר' : 'הצג';
+        toggle.setAttribute('aria-pressed', String(show));
+        input.focus();
+      });
+    }
 
     // Step 2: Install MediaWiki
     wikiSetupForm.addEventListener('submit', async (e) => {
       e.preventDefault();
-      installBtn.disabled = true;
+      // Validated here (not by the browser on submit) so the check of the
+      // administrator's password is up to date first
+      await checkAdminCredentials();
+      if (!wikiSetupForm.reportValidity()) {
+        return;
+      }
 
       const config = {
         dbName: document.getElementById('dbName').value,
         dbUser: document.getElementById('dbUser').value,
         dbPassword: document.getElementById('dbPassword').value,
         wikiName: document.getElementById('wikiName').value,
-        adminUser: document.getElementById('adminUser').value,
-        adminPassword: document.getElementById('adminPassword').value
+        adminUser: adminUserInput.value,
+        adminPassword: adminPasswordInput.value
       };
 
-      setStatus('מתקין MediaWiki...');
-
-      try {
-        const result = await ipcRenderer.invoke('install-mediawiki', config);
-        if (result.success) {
-          // Don't keep passwords in the page after a successful install
-          document.getElementById('dbPassword').value = '';
-          document.getElementById('adminPassword').value = '';
-          await refreshView();
-        } else {
-          setStatus(`שגיאה בהתקנת MediaWiki - ${result.error}`);
-          installBtn.disabled = false;
-        }
-      } catch (error) {
-        setStatus(`שגיאה - ${error.message}`);
-        installBtn.disabled = false;
+      const result = await runOperation('install-mediawiki', config);
+      if (result.success) {
+        // Don't keep passwords in the page after a successful install
+        document.getElementById('dbPassword').value = '';
+        adminPasswordInput.value = '';
+        await checkAdminCredentials();
+      } else if (/סיסמת המנהל|מנהל הוויקי|wiki admin/i.test(result.error || '')) {
+        // Most likely the administrator's password: let the user fix it and retry
+        adminPasswordInput.focus();
+        adminPasswordInput.select();
       }
     });
 
-    // Step 3: Start/Stop Servers
-    startServersBtn.addEventListener('click', async () => {
-      startServersBtn.disabled = true;
-      setStatus('מפעיל שרתים...');
+    // Step 3 and the bar: Start/Stop Servers
+    startServersBtn.addEventListener('click', () => runOperation('start-servers'));
+    stopServersBtn.addEventListener('click', () => runOperation('stop-servers'));
 
-      try {
-        const result = await ipcRenderer.invoke('start-servers');
-        if (result.success) {
-          await refreshView();
-        } else {
-          setStatus(`שגיאה בהפעלת השרתים - ${result.error}`);
-          startServersBtn.disabled = false;
-        }
-      } catch (error) {
-        setStatus(`שגיאה - ${error.message}`);
-        startServersBtn.disabled = false;
-      }
-    });
-
-    stopServersBtn.addEventListener('click', async () => {
-      stopServersBtn.disabled = true;
-      setStatus('מכבה שרתים...');
-
-      try {
-        const result = await ipcRenderer.invoke('stop-servers');
-        if (result.success) {
-          await refreshView();
-        } else {
-          setStatus(`שגיאה בכיבוי השרתים - ${result.error}`);
-          stopServersBtn.disabled = false;
-        }
-      } catch (error) {
-        setStatus(`שגיאה - ${error.message}`);
-        stopServersBtn.disabled = false;
-      }
-    });
-
-    // Hide everything until the status is known
-    step1.style.display = 'none';
-    step2.style.display = 'none';
-    step3.style.display = 'none';
-    refreshView().catch(error => setStatus(`שגיאה - ${error.message}`));
+    refreshView()
+      .then(checkAdminCredentials)
+      .catch(error => setStatus(`שגיאה: ${error.message}`, 'error'));
   </script>
 </body>
 </html>

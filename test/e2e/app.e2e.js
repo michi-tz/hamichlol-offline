@@ -4,8 +4,11 @@
 //   npm run test:e2e                 (on Linux without a display: xvfb-run -a npm run test:e2e)
 //
 // Everything runs in DEV_MODE, where downloads and servers are simulated, so
-// the tests are about the page: which step is shown, what the form accepts,
-// and that the state survives a restart of the app.
+// the tests are about the window: which step is shown, what the form accepts,
+// how the wiki is shown, and that the state survives a restart of the app.
+//
+// The wiki is a BrowserView of the main process, not part of the app page, so
+// it is inspected through the main process (wikiView() below).
 
 const { describe, it, beforeEach, afterEach } = require('mocha');
 const { expect } = require('chai');
@@ -55,7 +58,7 @@ describe('Application window (dev mode)', function() {
   }
 
   const visibleSteps = () => page.evaluate(() =>
-    ['step1', 'step2', 'step3'].filter(id => getComputedStyle(document.getElementById(id)).display !== 'none'));
+    ['step1', 'step2', 'step3'].filter(id => document.getElementById(id).checkVisibility()));
   const status = () => page.textContent('#status');
   const waitForStep = id => page.waitForSelector(`#${id}`, { state: 'visible' });
 
@@ -77,19 +80,62 @@ describe('Application window (dev mode)', function() {
     await waitForStep('step3');
   }
 
-  async function wikiFrame() {
-    await page.waitForFunction(() => document.getElementById('wikiBrowser').style.display === 'block');
-    await page.waitForFunction(() => window.frames.length > 0);
-    for (let i = 0; i < 50; i++) {
-      const frame = page.frames().find(candidate => candidate.url().startsWith('http://127.0.0.1:'));
-      if (frame) {
-        await frame.waitForLoadState();
-        return frame;
+  const wikiMode = () => page.evaluate(() => document.body.classList.contains('wiki-mode'));
+
+  // The wiki view as the main process sees it, or null when there is none
+  const viewInfo = () => app.evaluate(async ({ BrowserWindow }) => {
+    const window = BrowserWindow.getAllWindows()[0];
+    const view = window.getBrowserView();
+    if (!view) {
+      return null;
+    }
+    const contents = view.webContents;
+    return {
+      url: contents.getURL(),
+      loading: contents.isLoading(),
+      bounds: view.getBounds(),
+      contentSize: window.getContentSize(),
+      preferences: contents.getLastWebPreferences(),
+      heading: contents.isLoading() ? null : await contents.executeJavaScript(
+        "document.querySelector('h1') ? document.querySelector('h1').textContent : null"
+      )
+    };
+  });
+
+  // Run `code` in the wiki page, as if the user did it (clicks count as user
+  // actions, so the history of the page behaves as it does for real clicks)
+  const inWiki = code => app.evaluate(({ BrowserWindow }, source) =>
+    BrowserWindow.getAllWindows()[0].getBrowserView().webContents.executeJavaScript(source, true), code);
+
+  // Wait until the wiki is shown and its page has loaded
+  async function wikiView(predicate = info => info.url.startsWith('http://127.0.0.1:')) {
+    await page.waitForFunction(() => document.body.classList.contains('wiki-mode'));
+    for (let i = 0; i < 100; i++) {
+      const info = await viewInfo();
+      if (info && !info.loading && info.heading && predicate(info)) {
+        return info;
       }
       await page.waitForTimeout(100);
     }
-    throw new Error('The wiki frame did not load');
+    throw new Error('The wiki did not load');
   }
+
+  // Record links the app hands to the system browser instead of opening them
+  const captureExternalLinks = () => app.evaluate(({ shell }) => {
+    global.openedExternally = [];
+    shell.openExternal = async url => {
+      global.openedExternally.push(url);
+    };
+  });
+  const openedExternally = () => app.evaluate(() => global.openedExternally);
+
+  const menuItem = id => app.evaluate(({ Menu }, itemId) => {
+    const item = Menu.getApplicationMenu().getMenuItemById(itemId);
+    return item ? { label: item.label, enabled: item.enabled } : null;
+  }, id);
+  const clickMenuItem = id => app.evaluate(({ Menu }, itemId) => {
+    Menu.getApplicationMenu().getMenuItemById(itemId).click();
+  }, id);
 
   beforeEach(async function() {
     dataDir = makeTempDir('e2e');
@@ -108,7 +154,24 @@ describe('Application window (dev mode)', function() {
     it('should show only the first step', async function() {
       expect(await visibleSteps()).to.deep.equal(['step1']);
       expect(await status()).to.include('ממתין להתקנה');
-      expect(await page.isVisible('#wikiBrowser')).to.be.false;
+      expect(await wikiMode()).to.be.false;
+      expect(await page.isVisible('#wikiBar')).to.be.false;
+      expect(await viewInfo()).to.be.null;
+    });
+
+    it('should mark the current step in the step indicator', async function() {
+      const current = () => page.$eval('#stepper [aria-current=step]', item => item.dataset.step);
+      expect(await current()).to.equal('1');
+      await download();
+      expect(await current()).to.equal('2');
+      expect(await page.$eval('#stepper li[data-step="1"]', item => item.classList.contains('done'))).to.be.true;
+    });
+
+    it('should have a Hebrew menu instead of the default one', async function() {
+      const labels = await app.evaluate(({ Menu }) => Menu.getApplicationMenu().items.map(item => item.label));
+      expect(labels).to.include.members(['שרתים', 'ויקי', 'סנכרון', 'תצוגה', 'עריכה', 'עזרה']);
+      expect(await menuItem('start')).to.include({ enabled: false });
+      expect(await menuItem('syncSite')).to.include({ enabled: false });
     });
 
     it('should be a right-to-left Hebrew page', async function() {
@@ -120,10 +183,12 @@ describe('Application window (dev mode)', function() {
     it('should list the three components and what will happen with each', async function() {
       const items = await page.$$eval('#toolsList li', elements => elements.map(element => element.textContent));
 
+      const names = await page.$$eval('#toolsList li strong', elements => elements.map(element => element.textContent));
+
       expect(items).to.have.lengthOf(3);
-      expect(items[0]).to.match(/^PHP: /);
-      expect(items[1]).to.match(/^(MariaDB|MySQL): /);
-      expect(items[2]).to.match(/^MediaWiki: /);
+      expect(names[0]).to.equal('PHP');
+      expect(names[1]).to.match(/^(MariaDB|MySQL)$/);
+      expect(names[2]).to.equal('MediaWiki');
       for (const item of items) {
         expect(item).to.match(/תורד גרסה \d|כבר הורדה|שמותקנת במחשב|לא נמצא במחשב/);
       }
@@ -159,13 +224,74 @@ describe('Application window (dev mode)', function() {
       expect(await page.$eval('#wikiSetupForm', form => form.checkValidity())).to.be.false;
     });
 
+    const passwordRules = () => page.$$eval('#adminPasswordRules li', items =>
+      Object.fromEntries(items.map(item => [item.dataset.rule, item.className])));
+    const waitForRule = (id, className) => page.waitForFunction(([rule, expected]) => {
+      const item = document.querySelector(`#adminPasswordRules li[data-rule="${rule}"]`);
+      return item && item.className === expected;
+    }, [id, className]);
+
     it('should not accept an administrator password shorter than ten characters', async function() {
       await fillForm({ adminPassword: 'short' });
+      await waitForRule('minLength', 'fail');
       await page.click('#wikiSetupForm button[type=submit]');
       await page.waitForTimeout(300);
 
       expect(await visibleSteps()).to.deep.equal(['step2']);
-      expect(await page.$eval('#adminPassword', input => input.validity.tooShort)).to.be.true;
+      expect(await page.$eval('#adminPassword', input => input.validity.customError)).to.be.true;
+      expect(await page.$eval('#adminPassword', input => input.validationMessage)).to.include('10');
+    });
+
+    it('should show the password rules while typing', async function() {
+      expect(Object.values(await passwordRules())).to.not.be.empty;
+
+      await page.fill('#adminPassword', 'admin');
+      await waitForRule('minLength', 'fail');
+      expect(await passwordRules()).to.include({ minLength: 'fail', notInUsername: 'fail' });
+
+      await page.fill('#adminPassword', ADMIN_PASSWORD);
+      await waitForRule('minLength', 'ok');
+      expect(await passwordRules()).to.deep.equal({ minLength: 'ok', notInUsername: 'ok', notDefault: 'ok', notCommon: 'ok' });
+      expect(await page.$eval('#adminPassword', input => input.validity.valid)).to.be.true;
+    });
+
+    it('should refuse a password from MediaWiki\'s list of common passwords', async function() {
+      await fillForm({ adminPassword: 'qwertyuiop' });
+      await waitForRule('notCommon', 'fail');
+      await page.click('#wikiSetupForm button[type=submit]');
+      await page.waitForTimeout(300);
+
+      expect(await visibleSteps()).to.deep.equal(['step2']);
+      expect(await page.$eval('#adminPassword', input => input.validationMessage)).to.include('נפוצות');
+    });
+
+    it('should refuse a password that is part of the user name', async function() {
+      await fillForm({ adminUser: 'Administrator1', adminPassword: 'administrator' });
+      await waitForRule('notInUsername', 'fail');
+      expect(await page.$eval('#adminPassword', input => input.validity.valid)).to.be.false;
+    });
+
+    it('should refuse user names MediaWiki cannot create, and say how a name is stored', async function() {
+      await page.fill('#adminUser', 'admin@site');
+      await page.waitForFunction(() => document.getElementById('adminUserHint').textContent.includes('@'));
+      expect(await page.$eval('#adminUser', input => input.validity.customError)).to.be.true;
+
+      await page.fill('#adminUser', 'wiki admin');
+      await page.waitForFunction(() => document.getElementById('adminUserHint').textContent.includes('Wiki admin'));
+      expect(await page.$eval('#adminUser', input => input.validity.valid)).to.be.true;
+    });
+
+    it('should show and hide the password on request', async function() {
+      await page.fill('#adminPassword', ADMIN_PASSWORD);
+      const toggle = '.toggle-password[data-target="adminPassword"]';
+
+      await page.click(toggle);
+      expect(await page.getAttribute('#adminPassword', 'type')).to.equal('text');
+      expect(await page.getAttribute(toggle, 'aria-pressed')).to.equal('true');
+
+      await page.click(toggle);
+      expect(await page.getAttribute('#adminPassword', 'type')).to.equal('password');
+      expect(await page.inputValue('#adminPassword')).to.equal(ADMIN_PASSWORD);
     });
 
     it('should not accept database names with spaces, hyphens or Hebrew letters', async function() {
@@ -192,6 +318,8 @@ describe('Application window (dev mode)', function() {
       await page.waitForFunction(() => document.getElementById('status').textContent.includes('שגיאה'));
 
       expect(await status()).to.include('mysql');
+      // Shown as an error, not as an ordinary status
+      expect(await page.getAttribute('#status', 'class')).to.include('error');
       expect(await visibleSteps()).to.deep.equal(['step2']);
       expect(await page.isEnabled('#wikiSetupForm button[type=submit]')).to.be.true;
 
@@ -216,6 +344,7 @@ describe('Application window (dev mode)', function() {
 
       const settings = fs.readFileSync(path.join(dataDir, 'mediawiki', 'LocalSettings.php'), 'utf8');
       expect(settings).to.include("$wgDBname = 'my_wiki';");
+      expect(settings).to.include("$wgLanguageCode = 'he';");
       expect(settings).to.include("$wgSitename = 'המכלול של \\'בדיקה\\'';");
     });
   });
@@ -229,45 +358,115 @@ describe('Application window (dev mode)', function() {
     it('should offer only "start" before the servers run', async function() {
       expect(await page.isEnabled('#startServersBtn')).to.be.true;
       expect(await page.isEnabled('#stopServersBtn')).to.be.false;
+      expect(await menuItem('start')).to.include({ enabled: true });
+      expect(await menuItem('stop')).to.include({ enabled: false });
     });
 
-    it('should show the wiki inside the window once started', async function() {
+    it('should show the wiki across the whole window once started', async function() {
       await page.click('#startServersBtn');
-      const frame = await wikiFrame();
+      const info = await wikiView();
 
-      expect(await frame.textContent('h1')).to.equal('המכלול אופליין - אתר בדיקה');
-      expect(await status()).to.match(/השרתים פועלים \(PHP: \d+, MySQL: \d+\)/);
+      expect(info.heading).to.equal('המכלול אופליין - אתר בדיקה');
+      // The setup screen is gone; only the slim bar remains above the wiki
+      expect(await visibleSteps()).to.deep.equal([]);
+      expect(await page.isVisible('#status')).to.be.false;
+      expect(await page.isVisible('#wikiBar')).to.be.true;
+      const barHeight = await page.$eval('#wikiBar', bar => bar.getBoundingClientRect().height);
+      const [width, height] = info.contentSize;
+      expect(info.bounds).to.deep.equal({ x: 0, y: barHeight, width, height: height - barHeight });
+      expect(height - barHeight).to.be.above(height * 0.9);
+
+      expect(await page.textContent('#serversIndicator')).to.include('השרתים פועלים');
       expect(await page.isEnabled('#startServersBtn')).to.be.false;
       expect(await page.isEnabled('#stopServersBtn')).to.be.true;
+      expect(await menuItem('stop')).to.include({ enabled: true });
+      expect(await menuItem('wikiHome')).to.include({ enabled: true });
     });
 
-    it('should load the wiki from this computer only', async function() {
+    it('should keep filling the window when it is resized', async function() {
       await page.click('#startServersBtn');
-      const frame = await wikiFrame();
+      await wikiView();
+      await app.evaluate(({ BrowserWindow }) => BrowserWindow.getAllWindows()[0].setSize(900, 640));
+      await page.waitForTimeout(500);
 
-      expect(frame.url()).to.match(/^http:\/\/127\.0\.0\.1:\d+\/$/);
+      const info = await viewInfo();
+      const [width, height] = info.contentSize;
+      expect(info.bounds).to.deep.equal({ x: 0, y: 48, width, height: height - 48 });
     });
 
-    it('should hide the wiki and allow a restart after stopping', async function() {
+    it('should load the wiki from this computer only, in a page without Node access', async function() {
       await page.click('#startServersBtn');
-      const frame = await wikiFrame();
-      const url = frame.url();
+      const info = await wikiView();
+
+      expect(info.url).to.match(/^http:\/\/127\.0\.0\.1:\d+\/$/);
+      expect(info.preferences).to.include({ nodeIntegration: false, contextIsolation: true, sandbox: true });
+      expect(await inWiki('typeof require')).to.equal('undefined');
+      expect(await inWiki("document.documentElement.lang")).to.equal('he');
+    });
+
+    it('should follow links inside the wiki and go back from the bar', async function() {
+      await page.click('#startServersBtn');
+      const { url } = await wikiView();
+
+      await inWiki("document.getElementById('internal-link').click()");
+      const other = await wikiView(info => info.url.includes('title=Test'));
+      expect(other.heading).to.equal('דף בדיקה');
+      await page.waitForFunction(() => !document.getElementById('wikiBackBtn').disabled);
+
+      await page.click('#wikiBackBtn');
+      expect((await wikiView(info => info.url === url)).heading).to.include('אתר בדיקה');
+    });
+
+    it('should open other sites in the system browser, not in the app', async function() {
+      await page.click('#startServersBtn');
+      const { url } = await wikiView();
+      await captureExternalLinks();
+
+      await inWiki("document.getElementById('external-link').click()");
+      await inWiki("document.getElementById('new-window-link').click()");
+      await page.waitForTimeout(500);
+
+      expect(await openedExternally()).to.deep.equal(['https://www.example.org/', 'https://www.example.org/new']);
+      expect((await viewInfo()).url).to.equal(url);
+      expect(await app.evaluate(({ BrowserWindow }) => BrowserWindow.getAllWindows().length)).to.equal(1);
+    });
+
+    it('should go back to the setup screen and allow a restart after stopping', async function() {
+      await page.click('#startServersBtn');
+      const { url } = await wikiView();
 
       await page.click('#stopServersBtn');
       await page.waitForFunction(() => document.getElementById('status').textContent.includes('אפשר להפעיל'));
 
-      expect(await page.isVisible('#wikiBrowser')).to.be.false;
+      expect(await wikiMode()).to.be.false;
+      expect(await viewInfo()).to.be.null;
+      expect(await visibleSteps()).to.deep.equal(['step3']);
       expect(await page.isEnabled('#startServersBtn')).to.be.true;
       expect(await page.isEnabled('#stopServersBtn')).to.be.false;
       expect(await fetch(url).then(() => 'up', () => 'down')).to.equal('down');
 
       await page.click('#startServersBtn');
-      expect(await (await wikiFrame()).textContent('h1')).to.include('אתר בדיקה');
+      expect((await wikiView()).heading).to.include('אתר בדיקה');
+    });
+
+    it('should be controlled from the menu as well, keeping the window in step', async function() {
+      await clickMenuItem('start');
+      await wikiView();
+      expect(await page.isEnabled('#stopServersBtn')).to.be.true;
+
+      await clickMenuItem('restart');
+      await page.waitForFunction(() => !document.getElementById('stopServersBtn').disabled);
+      expect((await wikiView()).heading).to.include('אתר בדיקה');
+
+      await clickMenuItem('stop');
+      await page.waitForFunction(() => !document.body.classList.contains('wiki-mode'));
+      expect(await visibleSteps()).to.deep.equal(['step3']);
+      expect(await menuItem('start')).to.include({ enabled: true });
     });
 
     it('should stop the servers when the app is closed', async function() {
       await page.click('#startServersBtn');
-      const url = (await wikiFrame()).url();
+      const { url } = await wikiView();
       expect((await fetch(url)).status).to.equal(200);
 
       await close();
@@ -300,11 +499,13 @@ describe('Application window (dev mode)', function() {
       await download();
       await install();
       await page.click('#startServersBtn');
-      await wikiFrame();
+      await wikiView();
       await close();
       await launch();
 
-      expect(await page.isVisible('#wikiBrowser')).to.be.false;
+      expect(await wikiMode()).to.be.false;
+      expect(await viewInfo()).to.be.null;
+      expect(await visibleSteps()).to.deep.equal(['step3']);
       expect(await page.isEnabled('#stopServersBtn')).to.be.false;
     });
 
