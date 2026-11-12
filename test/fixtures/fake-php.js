@@ -32,6 +32,7 @@ if (args[0] === '-r') {
 } else if (installer) {
   fs.writeFileSync('install-args.json', JSON.stringify(args));
   if (process.env.FAKE_PHP_INSTALL_FAILS) {
+    console.log('Fake installer: checking the environment');
     console.error('Fake installer error: database refused the connection');
     process.exit(1);
   }
