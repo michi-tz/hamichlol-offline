@@ -748,16 +748,58 @@ async function downloadFirstAvailable(urls, zipPath) {
 // Download a zip and extract it into `targetDir`. Work happens in temporary
 // paths and the result is renamed into place only when complete, so an
 // interrupted download is never mistaken for a finished one.
+// On Windows an antivirus scanning a file that was just written keeps it
+// locked for a while; opening, moving or deleting it (or a folder holding it)
+// then fails with EPERM, EBUSY or EACCES. Such operations are retried.
+const LOCK_ERROR_CODES = new Set(['EPERM', 'EBUSY', 'EACCES']);
+const lockRetry = { attempts: 60, delayMs: 500 };
+
+async function retryWhileLocked(file, action) {
+  for (let attempt = 1; ; attempt++) {
+    try {
+      return action();
+    } catch (error) {
+      if (process.platform !== 'win32' || !LOCK_ERROR_CODES.has(error.code)) {
+        throw error;
+      }
+      if (attempt >= lockRetry.attempts) {
+        const locked = new Error(
+          `אין גישה לקובץ ${file} (${error.code}). ייתכן שתוכנת אנטי-וירוס חוסמת אותו: ` +
+          'יש לבדוק ב"היסטוריית ההגנה" של אבטחת Windows ולנסות שוב'
+        );
+        locked.code = error.code;
+        throw locked;
+      }
+      await delay(lockRetry.delayMs);
+    }
+  }
+}
+
+function removePath(target) {
+  return retryWhileLocked(target, () => fs.rmSync(target, { recursive: true, force: true }));
+}
+
+// Clean-up that must not hide the error that made it necessary; whatever is
+// left is removed at the start of the next attempt.
+async function removeQuietly(target) {
+  try {
+    await removePath(target);
+  } catch (error) {
+    console.error(`Could not remove ${target}: ${error.message}`);
+  }
+}
+
 async function downloadAndExtract(urls, targetDir, { stripRootFolder = false, prepare } = {}) {
   const zipPath = `${targetDir}.zip`;
   const partialDir = `${targetDir}.partial`;
-  fs.rmSync(zipPath, { force: true });
-  fs.rmSync(partialDir, { recursive: true, force: true });
+  await removePath(zipPath);
+  await removePath(partialDir);
   fs.mkdirSync(partialDir, { recursive: true });
 
   try {
     await downloadFirstAvailable(urls, zipPath);
-    new AdmZip(zipPath).extractAllTo(partialDir, true);
+    const zipData = await retryWhileLocked(zipPath, () => fs.readFileSync(zipPath));
+    new AdmZip(zipData).extractAllTo(partialDir, true);
 
     let root = partialDir;
     if (stripRootFolder) {
@@ -771,18 +813,18 @@ async function downloadAndExtract(urls, targetDir, { stripRootFolder = false, pr
       prepare(root, targetDir);
     }
 
-    fs.rmSync(targetDir, { recursive: true, force: true });
-    fs.renameSync(root, targetDir);
+    await removePath(targetDir);
+    await retryWhileLocked(targetDir, () => fs.renameSync(root, targetDir));
   } finally {
-    fs.rmSync(zipPath, { force: true });
-    fs.rmSync(partialDir, { recursive: true, force: true });
+    await removeQuietly(zipPath);
+    await removeQuietly(partialDir);
   }
 }
 
 async function initializeDatabase() {
   const { dbDataDir } = getPaths();
   const partialDir = `${dbDataDir}.partial`;
-  fs.rmSync(partialDir, { recursive: true, force: true });
+  await removePath(partialDir);
 
   const database = requireDatabase();
   const asRoot = runsAsRoot() ? ['--user=root'] : [];
@@ -802,8 +844,8 @@ async function initializeDatabase() {
       ...asRoot
     ]);
   }
-  fs.rmSync(dbDataDir, { recursive: true, force: true });
-  fs.renameSync(partialDir, dbDataDir);
+  await removePath(dbDataDir);
+  await retryWhileLocked(dbDataDir, () => fs.renameSync(partialDir, dbDataDir));
   console.log('MySQL data directory initialized');
 }
 
@@ -819,7 +861,7 @@ function assertCanDownload(name, problem) {
 
 // Copy a MediaWiki installation found on the computer into the data folder, so
 // the existing installation (and its wiki, if any) is never modified.
-function copyMediaWiki(sourceDir, targetDir) {
+async function copyMediaWiki(sourceDir, targetDir) {
   const partialDir = `${targetDir}.partial`;
   // Per-wiki state of the existing installation; a fresh wiki starts without it
   const skipped = ['LocalSettings.php', 'images', 'cache'];
@@ -827,7 +869,7 @@ function copyMediaWiki(sourceDir, targetDir) {
   // different spelling from the one it was given
   const root = path.toNamespacedPath(path.resolve(sourceDir));
   const isSkipped = source => skipped.includes(path.relative(root, path.toNamespacedPath(path.resolve(source))));
-  fs.rmSync(partialDir, { recursive: true, force: true });
+  await removePath(partialDir);
 
   try {
     fs.cpSync(sourceDir, partialDir, {
@@ -838,10 +880,10 @@ function copyMediaWiki(sourceDir, targetDir) {
     });
     fs.mkdirSync(path.join(partialDir, 'images'), { recursive: true });
     fs.mkdirSync(path.join(partialDir, 'cache'), { recursive: true });
-    fs.rmSync(targetDir, { recursive: true, force: true });
-    fs.renameSync(partialDir, targetDir);
+    await removePath(targetDir);
+    await retryWhileLocked(targetDir, () => fs.renameSync(partialDir, targetDir));
   } finally {
-    fs.rmSync(partialDir, { recursive: true, force: true });
+    await removeQuietly(partialDir);
   }
 }
 
@@ -918,7 +960,7 @@ async function downloadServers() {
     const mediawiki = resolveMediaWiki();
     if (mediawiki.source === 'system') {
       console.log(`Copying installed MediaWiki ${mediawiki.version} from ${mediawiki.dir}`);
-      copyMediaWiki(mediawiki.dir, mediaWikiPath);
+      await copyMediaWiki(mediawiki.dir, mediaWikiPath);
     } else {
       console.log(`Downloading MediaWiki ${DOWNLOADS.mediawiki.version}...`);
       await downloadAndExtract(DOWNLOADS.mediawiki.urls, mediaWikiPath, { stripRootFolder: true });
@@ -1238,6 +1280,7 @@ module.exports = {
     configurePhpIni,
     downloadAndExtract,
     copyMediaWiki,
+    lockRetry,
     identifyProcess,
     mysqlAdminShutdown,
     createDatabase

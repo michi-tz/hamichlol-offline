@@ -569,45 +569,45 @@ describe('Server manager building blocks', function() {
       fs.writeFileSync(path.join(source, 'extensions', 'Cite', 'extension.json'), '{}');
     });
 
-    it('should copy the program files', function() {
-      copyMediaWiki(source, target);
+    it('should copy the program files', async function() {
+      await copyMediaWiki(source, target);
 
       expect(fs.readFileSync(path.join(target, 'index.php'), 'utf8')).to.equal('index');
       expect(fs.existsSync(path.join(target, 'extensions', 'Cite', 'extension.json'))).to.be.true;
       expect(fs.existsSync(path.join(target, 'skins'))).to.be.true;
     });
 
-    it('should leave out the existing wiki\'s settings, uploads and cache', function() {
-      copyMediaWiki(source, target);
+    it('should leave out the existing wiki\'s settings, uploads and cache', async function() {
+      await copyMediaWiki(source, target);
 
       expect(fs.existsSync(path.join(target, 'LocalSettings.php'))).to.be.false;
       expect(fs.readdirSync(path.join(target, 'images'))).to.deep.equal([]);
       expect(fs.readdirSync(path.join(target, 'cache'))).to.deep.equal([]);
     });
 
-    it('should only leave out those names at the top level', function() {
+    it('should only leave out those names at the top level', async function() {
       fs.mkdirSync(path.join(source, 'resources', 'images'), { recursive: true });
       fs.writeFileSync(path.join(source, 'resources', 'images', 'logo.svg'), 'logo');
       fs.mkdirSync(path.join(source, 'includes', 'cache'));
       fs.writeFileSync(path.join(source, 'includes', 'cache', 'CacheHelper.php'), 'code');
       fs.writeFileSync(path.join(source, 'includes', 'LocalSettings.php'), 'code');
 
-      copyMediaWiki(source, target);
+      await copyMediaWiki(source, target);
 
       expect(fs.existsSync(path.join(target, 'resources', 'images', 'logo.svg'))).to.be.true;
       expect(fs.existsSync(path.join(target, 'includes', 'cache', 'CacheHelper.php'))).to.be.true;
       expect(fs.existsSync(path.join(target, 'includes', 'LocalSettings.php'))).to.be.true;
     });
 
-    it('should not modify the installation it copies from', function() {
-      copyMediaWiki(source, target);
+    it('should not modify the installation it copies from', async function() {
+      await copyMediaWiki(source, target);
 
       expect(fs.readFileSync(path.join(source, 'LocalSettings.php'), 'utf8')).to.equal('secret settings');
       expect(fs.readFileSync(path.join(source, 'images', 'a', 'photo.jpg'), 'utf8')).to.equal('photo');
       expect(fs.readFileSync(path.join(source, 'cache', 'l10n.cdb'), 'utf8')).to.equal('cache');
     });
 
-    it('should turn symlinks into real files and folders', function() {
+    it('should turn symlinks into real files and folders', async function() {
       if (process.platform === 'win32') {
         this.skip(); // creating symlinks needs special rights there
       }
@@ -617,7 +617,7 @@ describe('Server manager building blocks', function() {
       fs.symlinkSync(path.join(elsewhere, 'Gadgets'), path.join(source, 'extensions', 'Gadgets'));
       fs.symlinkSync(path.join(source, 'index.php'), path.join(source, 'alias.php'));
 
-      copyMediaWiki(source, target);
+      await copyMediaWiki(source, target);
 
       expect(fs.lstatSync(path.join(target, 'extensions', 'Gadgets')).isSymbolicLink()).to.be.false;
       expect(fs.existsSync(path.join(target, 'extensions', 'Gadgets', 'extension.json'))).to.be.true;
@@ -625,7 +625,7 @@ describe('Server manager building blocks', function() {
       expect(fs.readFileSync(path.join(target, 'alias.php'), 'utf8')).to.equal('index');
     });
 
-    it('should skip a top-level LocalSettings.php symlink that points nowhere', function() {
+    it('should skip a top-level LocalSettings.php symlink that points nowhere', async function() {
       if (process.platform === 'win32') {
         this.skip();
       }
@@ -633,27 +633,28 @@ describe('Server manager building blocks', function() {
       fs.rmSync(path.join(source, 'LocalSettings.php'));
       fs.symlinkSync('/etc/mediawiki/does-not-exist.php', path.join(source, 'LocalSettings.php'));
 
-      copyMediaWiki(source, target);
+      await copyMediaWiki(source, target);
 
       expect(fs.existsSync(path.join(target, 'index.php'))).to.be.true;
       expect(fs.existsSync(path.join(target, 'LocalSettings.php'))).to.be.false;
     });
 
-    it('should replace an incomplete earlier copy', function() {
+    it('should replace an incomplete earlier copy', async function() {
       fs.mkdirSync(target);
       fs.writeFileSync(path.join(target, 'stale.php'), 'old');
       fs.mkdirSync(`${target}.partial`);
       fs.writeFileSync(path.join(`${target}.partial`, 'half.php'), 'x');
 
-      copyMediaWiki(source, target);
+      await copyMediaWiki(source, target);
 
       expect(fs.existsSync(path.join(target, 'stale.php'))).to.be.false;
       expect(fs.existsSync(`${target}.partial`)).to.be.false;
       expect(fs.existsSync(path.join(target, 'index.php'))).to.be.true;
     });
 
-    it('should leave no half-made copy when copying fails', function() {
-      expect(() => copyMediaWiki(path.join(tempDir, 'missing'), target)).to.throw();
+    it('should leave no half-made copy when copying fails', async function() {
+      const error = await copyMediaWiki(path.join(tempDir, 'missing'), target).then(() => null, failure => failure);
+      expect(error).to.be.an('error');
 
       expect(fs.existsSync(target)).to.be.false;
       expect(fs.existsSync(`${target}.partial`)).to.be.false;
