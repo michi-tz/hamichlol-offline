@@ -42,7 +42,9 @@ const MARIADB_BINARIES = {
 };
 
 // Automatic downloads are Windows builds; elsewhere installed software is used.
-const CAN_DOWNLOAD_SERVERS = process.platform === 'win32';
+function canDownloadServers() {
+  return process.platform === 'win32';
+}
 
 // Unix socket paths are limited to about 100 characters.
 const MAX_SOCKET_PATH_LENGTH = 100;
@@ -349,7 +351,9 @@ async function terminate(child) {
 
 function readRunState() {
   try {
-    return JSON.parse(fs.readFileSync(getPaths().runStateFile, 'utf8'));
+    const state = JSON.parse(fs.readFileSync(getPaths().runStateFile, 'utf8'));
+    // A damaged file must not stop the servers from ever starting again
+    return state && typeof state === 'object' ? state : {};
   } catch (error) {
     return {};
   }
@@ -581,6 +585,26 @@ function replacePhpSetting(source, name, expression) {
   return source.replace(pattern, () => `$${name} = ${expression};`);
 }
 
+// Distribution packages of MediaWiki (Debian, Ubuntu) point the cache and the
+// error logs at system folders such as /var/cache/mediawiki, which only the
+// web server's user may write to; every page then fails for an ordinary user.
+// This block, appended to LocalSettings.php, keeps them inside the wiki folder.
+const LOCAL_PATHS_MARKER = '# Added by Hamichlol Offline: keep caches and logs inside this folder';
+const LOCAL_PATHS_SETTINGS = [
+  LOCAL_PATHS_MARKER,
+  '$wgCacheDirectory = "$IP/cache";',
+  'if ( $wgDBerrorLog ) {',
+  '\t$wgDBerrorLog = "$IP/cache/dberror.log";',
+  '}',
+  "foreach ( [ 'exception', 'error', 'fatal' ] as $hamichlolLogGroup ) {",
+  '\tif ( isset( $wgDebugLogGroups[$hamichlolLogGroup] ) ) {',
+  '\t\t$wgDebugLogGroups[$hamichlolLogGroup] = "$IP/cache/$hamichlolLogGroup.log";',
+  '\t}',
+  '}',
+  'unset( $hamichlolLogGroup );',
+  ''
+].join('\n');
+
 // Make LocalSettings.php independent of the ports chosen at install time:
 // the server URL is detected per request and the DB port comes from the environment.
 function patchLocalSettings(filePath) {
@@ -591,6 +615,9 @@ function patchLocalSettings(filePath) {
     'wgDBserver',
     `'${LOOPBACK_HOST}:' . ( getenv( '${DB_PORT_ENV}' ) ?: '${DEFAULT_MYSQL_PORT}' )`
   );
+  if (!source.includes(LOCAL_PATHS_MARKER)) {
+    source = `${source.replace(/\s*$/, '')}\n\n${LOCAL_PATHS_SETTINGS}`;
+  }
   fs.writeFileSync(filePath, source);
 }
 
@@ -600,12 +627,13 @@ function configurePhpIni(sourceDir, finalDir) {
   let content = fs.readFileSync(path.join(sourceDir, 'php.ini-development'), 'utf8');
   // Without an explicit extension_dir, Windows PHP looks for extensions in C:\php\ext
   content = content.replace(
-    /^;\s*extension_dir\s*=\s*"ext"\s*$/m,
+    /^;\s*extension_dir\s*=\s*"ext"[ \t]*(?=\r?$)/m,
     () => `extension_dir = "${path.join(finalDir, 'ext')}"`
   );
   for (const extension of PHP_EXTENSIONS) {
     content = content.replace(
-      new RegExp(`^;extension=${extension}\\s*$`, 'm'),
+      // Only trailing blanks may follow, so line endings and neighbours are kept
+      new RegExp(`^;extension=${extension}[ \\t]*(?=\\r?$)`, 'm'),
       `extension=${extension}`
     );
   }
@@ -658,7 +686,7 @@ function getStatus() {
       },
       mediawiki: { source: mediawiki.source, version: mediawiki.version, path: mediawiki.dir, problem: mediawiki.problem || null }
     },
-    canDownloadServers: CAN_DOWNLOAD_SERVERS,
+    canDownloadServers: canDownloadServers(),
     versions: {
       php: DOWNLOADS.php.version,
       mariadb: DOWNLOADS.mariadb.version,
@@ -749,7 +777,7 @@ async function initializeDatabase() {
 }
 
 function assertCanDownload(name, problem) {
-  if (CAN_DOWNLOAD_SERVERS) {
+  if (canDownloadServers()) {
     return;
   }
   const details = problem ? ` נמצאה התקנה שאינה מתאימה: ${problem}.` : '';
@@ -763,7 +791,11 @@ function assertCanDownload(name, problem) {
 function copyMediaWiki(sourceDir, targetDir) {
   const partialDir = `${targetDir}.partial`;
   // Per-wiki state of the existing installation; a fresh wiki starts without it
-  const skipped = ['LocalSettings.php', 'images', 'cache'].map(name => path.join(sourceDir, name));
+  const skipped = ['LocalSettings.php', 'images', 'cache'];
+  // Compared in one canonical form: on Windows the copy reports paths in a
+  // different spelling from the one it was given
+  const root = path.toNamespacedPath(path.resolve(sourceDir));
+  const isSkipped = source => skipped.includes(path.relative(root, path.toNamespacedPath(path.resolve(source))));
   fs.rmSync(partialDir, { recursive: true, force: true });
 
   try {
@@ -771,7 +803,7 @@ function copyMediaWiki(sourceDir, targetDir) {
       recursive: true,
       // Distribution packages are full of symlinks into other system folders
       dereference: true,
-      filter: source => !skipped.includes(source)
+      filter: source => !isSkipped(source)
     });
     fs.mkdirSync(path.join(partialDir, 'images'), { recursive: true });
     fs.mkdirSync(path.join(partialDir, 'cache'), { recursive: true });
@@ -1124,7 +1156,11 @@ async function stopServers() {
   if (devServer) {
     const server = devServer;
     devServer = null;
-    await new Promise(resolve => server.close(() => resolve()));
+    await new Promise(resolve => {
+      server.close(() => resolve());
+      // Do not wait for idle keep-alive connections (e.g. the wiki frame's)
+      server.closeAllConnections();
+    });
     console.log('Mock PHP server stopped');
   }
 
@@ -1164,5 +1200,14 @@ module.exports = {
   downloadServers,
   installMediaWiki,
   startServers,
-  stopServers
+  stopServers,
+  // Building blocks, exported for the tests only
+  _internal: {
+    configurePhpIni,
+    downloadAndExtract,
+    copyMediaWiki,
+    identifyProcess,
+    mysqlAdminShutdown,
+    createDatabase
+  }
 };

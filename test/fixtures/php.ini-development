@@ -1,0 +1,28 @@
+; Shortened copy of the php.ini-development that ships with PHP for Windows:
+; only the parts the app edits, plus neighbours it must leave alone.
+
+[PHP]
+engine = On
+memory_limit = 128M
+
+; Directory in which the loadable extensions (modules) reside.
+; https://php.net/extension-dir
+;extension_dir = "./"
+; On windows:
+;extension_dir = "ext"
+
+;extension=bz2
+;extension=curl
+;extension=fileinfo
+;extension=gd
+;extension=gettext
+;extension=intl
+;extension=mbstring
+;extension=exif      ; Must be after mbstring as it depends on it
+;extension=mysqli
+;extension=openssl
+;extension=pdo_mysql
+;extension=sodium
+
+[Date]
+;date.timezone =
