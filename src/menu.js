@@ -24,7 +24,7 @@ function buildMenuTemplate(state, actions, { platform = process.platform } = {})
     template.push({
       label: APP_NAME,
       submenu: [
-        { label: 'אודות', click: () => actions.about() },
+        { id: 'about', label: 'אודות', click: () => actions.about() },
         { type: 'separator' },
         { role: 'services' },
         { type: 'separator' },

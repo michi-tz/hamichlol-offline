@@ -46,7 +46,9 @@ describe('Application menu', function() {
     expect(template.slice(1).map(menu => menu.label)).to.deep.equal(['שרתים', 'ויקי', 'סנכרון', 'תצוגה', 'עריכה', 'עזרה']);
     // Quit and about live in the application menu there
     expect(findItem(template, 'quit')).to.be.null;
-    expect(findItem(template, 'about')).to.be.null;
+    expect(template[0].submenu.map(item => item.id)).to.include('about');
+    const help = template[template.length - 1];
+    expect(help.submenu.map(item => item.id)).to.not.include('about');
   });
 
   it('should only offer what can be done in each state', function() {
