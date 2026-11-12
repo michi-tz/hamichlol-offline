@@ -114,6 +114,8 @@ describe('Real installation flow with fake servers', function() {
       expect(args).to.include(`--installdbpass=${config.dbPassword}`);
       expect(args).to.include(`--pass=${config.adminPassword}`);
       expect(args).to.include('--scriptpath=');
+      // A Hebrew wiki (content and interface language)
+      expect(args).to.include('--lang=he');
       // The site name and the administrator come last, each as one argument
       expect(args.slice(-2)).to.deep.equal([config.wikiName, config.adminUser]);
       // Nothing was interpreted by a shell
@@ -193,6 +195,12 @@ describe('Real installation flow with fake servers', function() {
       expect(getStatus()).to.include({ installed: false, running: false });
       expect(queries().slice(-1)).to.deep.equal(['SHUTDOWN']);
       expect(fs.existsSync(getPaths().runStateFile)).to.be.false;
+    });
+
+    it('should install a Hebrew wiki', async function() {
+      await installMediaWiki(VALID_CONFIG);
+
+      expect(fs.readFileSync(getPaths().localSettings, 'utf8')).to.include('$wgLanguageCode = "he";');
     });
 
     it('should allow another attempt after a failed installation', async function() {

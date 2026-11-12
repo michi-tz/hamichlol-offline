@@ -37,12 +37,15 @@ if (args[0] === '-r') {
   }
   const dbServer = args.find(arg => arg.startsWith('--dbserver=')).split('=')[1];
   const server = args.find(arg => arg.startsWith('--server=')).split('=')[1];
+  // Like install.php: --lang sets the wiki's language (English by default)
+  const lang = (args.find(arg => arg.startsWith('--lang=')) || '--lang=en').split('=')[1];
   fs.writeFileSync('LocalSettings.php', [
     '<?php',
     '$wgSitename = "Fake";',
     `$wgServer = "${server}";`,
     '$wgDBtype = "mysql";',
     `$wgDBserver = "${dbServer}";`,
+    `$wgLanguageCode = "${lang}";`,
     ''
   ].join('\n'));
 } else if (args.includes('-S')) {

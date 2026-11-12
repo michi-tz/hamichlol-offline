@@ -138,6 +138,8 @@ describe('Real installed software', function() {
 
     expect(query.general.sitename).to.equal(CONFIG.wikiName);
     expect(query.general.dbtype).to.equal('mysql');
+    // New wikis are Hebrew
+    expect(query.general.lang).to.equal('he');
     // The address is detected from the request, not fixed at install time
     expect(query.general.server).to.equal(`http://127.0.0.1:${ports.phpPort}`);
   });

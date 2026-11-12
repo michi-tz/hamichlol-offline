@@ -33,6 +33,9 @@ const IDENTIFIER_RE = /^[A-Za-z0-9_]{1,64}$/;
 const DB_USER_RE = /^[A-Za-z0-9_]{1,32}$/;
 const MIN_ADMIN_PASSWORD_LENGTH = 10;
 
+// Content and interface language of newly installed wikis
+const WIKI_LANGUAGE = 'he';
+
 const PHP_EXTENSIONS = ['mysqli', 'intl', 'mbstring', 'fileinfo', 'openssl', 'gd'];
 
 // MariaDB renamed its executables (mysqld -> mariadbd, ...). Accept both names.
@@ -1023,7 +1026,9 @@ async function installMediaWiki(rawConfig) {
 
     fs.writeFileSync(
       localSettings,
-      `<?php\n// Mock LocalSettings.php for development\n$wgSitename = ${phpString(wikiName)};\n$wgDBname = ${phpString(dbName)};\n`
+      '<?php\n// Mock LocalSettings.php for development\n' +
+      `$wgSitename = ${phpString(wikiName)};\n$wgDBname = ${phpString(dbName)};\n` +
+      `$wgLanguageCode = ${phpString(WIKI_LANGUAGE)};\n`
     );
 
     return true;
@@ -1051,6 +1056,8 @@ async function installMediaWiki(rawConfig) {
         '--dbprefix=mw_',
         `--server=http://localhost:${DEFAULT_PHP_PORT}`,
         '--scriptpath=',
+        // Content and interface language: sets $wgLanguageCode in LocalSettings.php
+        `--lang=${WIKI_LANGUAGE}`,
         `--pass=${adminPassword}`,
         wikiName,
         adminUser
@@ -1089,8 +1096,8 @@ async function startServers() {
       const server = http.createServer((req, res) => {
         res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' });
         res.end(`
-          <html dir="rtl">
-            <head><title>המכלול - אתר בדיקה</title></head>
+          <html dir="rtl" lang="${WIKI_LANGUAGE}">
+            <head><meta charset="utf-8"><title>המכלול - אתר בדיקה</title></head>
             <body style="font-family: Arial; direction: rtl; padding: 20px;">
               <h1>המכלול אופליין - אתר בדיקה</h1>
               <p>זהו אתר דמה לצורך בדיקת האפליקציה במצב "על יבש".</p>
@@ -1192,6 +1199,7 @@ module.exports = {
   dbServerArgs,
   getPaths,
   getStatus,
+  WIKI_LANGUAGE,
   cleanupStaleProcesses,
   isDevMode,
   validateConfig,
