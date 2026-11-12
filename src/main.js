@@ -1,13 +1,15 @@
 const { app, BrowserWindow, ipcMain, net } = require('electron');
 const path = require('path');
-const { setDataPath, setFetch, getStatus, cleanupStaleProcesses, downloadServers, installMediaWiki, startServers, stopServers } = require('./server-manager');
+const { setDataPath, setFetch, isDevMode, getStatus, cleanupStaleProcesses, downloadServers, installMediaWiki, startServers, stopServers } = require('./server-manager');
 
 let mainWindow;
 let isQuitting = false;
 
 // Servers, MediaWiki and the database must live in a writable location.
 // The install directory (process.resourcesPath) is usually read-only.
-setDataPath(process.env.HAMICHLOL_DATA_DIR || path.join(app.getPath('userData'), 'data'));
+// Dev mode keeps its stand-in files in a folder of its own: in the real data
+// folder they would look like downloaded servers, and starting those fails.
+setDataPath(process.env.HAMICHLOL_DATA_DIR || path.join(app.getPath('userData'), isDevMode() ? 'data-dev' : 'data'));
 
 // Download through Chromium's network stack rather than Node's: it uses the
 // proxy and the certificates configured on the computer, which matters behind

@@ -27,6 +27,8 @@ const {
   getPaths,
   dbServerArgs,
   cleanupStaleProcesses,
+  getStatus,
+  startServers,
   validateConfig,
   buildDatabaseSetupQueries,
   patchLocalSettings,
@@ -156,6 +158,29 @@ describe('Server manager building blocks', function() {
     it('should never claim this test process or the init process', async function() {
       expect(await identifyProcess({ pid: process.pid, exe: process.execPath, marker: MARKER })).to.equal('gone');
       expect(await identifyProcess({ pid: 1, exe: process.execPath, marker: MARKER })).to.equal('gone');
+    });
+  });
+
+  // Runs on every system, Windows included: there the failure is reported
+  // differently (thrown at once, as "spawn UNKNOWN") than on Linux and macOS.
+  describe('A server program that cannot be run', function() {
+    it('should name the program instead of reporting a bare "spawn" error', async function() {
+      const { mariadbDir, mediaWikiPath, localSettings, dbDataDir, runStateFile } = getPaths();
+      // E.g. a stand-in file left in the data folder by dev mode
+      const server = path.join(mariadbDir, 'bin', 'mariadbd.exe');
+      fs.mkdirSync(path.dirname(server), { recursive: true });
+      fs.writeFileSync(server, 'MOCK MARIADB EXE', { mode: 0o644 });
+      fs.mkdirSync(path.join(dbDataDir, 'mysql'), { recursive: true });
+      fs.mkdirSync(mediaWikiPath, { recursive: true });
+      fs.writeFileSync(path.join(mediaWikiPath, 'index.php'), '');
+      fs.writeFileSync(localSettings, '');
+
+      const error = await startServers().then(() => null, failure => failure);
+
+      expect(error).to.be.an('error');
+      expect(error.message).to.include('MySQL could not be started').and.to.include(server);
+      expect(getStatus().running).to.be.false;
+      expect(fs.existsSync(runStateFile)).to.be.false;
     });
   });
 

@@ -167,9 +167,17 @@ describe('Electron main process', function() {
     });
 
     it('should keep its data in the user data folder, not next to the program', async function() {
+      process.env.DEV_MODE = 'false';
       await loadMain();
 
       expect(serverManager.getPaths().dataPath).to.equal(path.join(tempDir, 'userData', 'data'));
+    });
+
+    it('should keep dev mode\'s stand-in files apart from the real data', async function() {
+      // In the real data folder they would be taken for downloaded servers
+      await loadMain();
+
+      expect(serverManager.getPaths().dataPath).to.equal(path.join(tempDir, 'userData', 'data-dev'));
     });
 
     it('should use HAMICHLOL_DATA_DIR when it is set', async function() {

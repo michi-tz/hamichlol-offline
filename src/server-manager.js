@@ -283,10 +283,22 @@ function logOutput(child, label) {
 // Spawn a server process and resolve once it accepts TCP connections on `port`.
 // Rejects (and kills the process) if it fails to start, exits early or times out.
 //
+function startError(label, file, error) {
+  const wrapped = new Error(`${label} could not be started (${file}): ${error.code || error.message}`);
+  wrapped.code = error.code;
+  return wrapped;
+}
+
 // `key` ('mysql' or 'php') tracks the process while it is still starting, so
 // that stopping the servers or a crash at that moment does not leave it behind.
 async function spawnServer(label, key, file, args, port, options = {}) {
-  const child = spawn(file, args, { windowsHide: true, ...options });
+  let child;
+  try {
+    child = spawn(file, args, { windowsHide: true, ...options });
+  } catch (error) {
+    // Windows reports a file that is not a program as just "spawn UNKNOWN"
+    throw startError(label, file, error);
+  }
   startingServers.set(key, { child, port });
   writeRunState();
   try {
@@ -299,7 +311,7 @@ async function spawnServer(label, key, file, args, port, options = {}) {
 async function waitUntilListening(label, child, port) {
   let failure = null;
   child.once('error', error => {
-    failure = failure || error;
+    failure = failure || startError(label, child.spawnfile, error);
   });
   child.once('exit', code => {
     failure = failure || new Error(`${label} exited with code ${code}`);
