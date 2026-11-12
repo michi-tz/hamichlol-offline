@@ -248,15 +248,17 @@ describe('Downloads', function() {
 
       const asWindows = () => Object.defineProperty(process, 'platform', { value: 'win32' });
 
-      it('should wait for a downloaded file that is briefly locked', async function() {
+      it('should never need to read the archive back from disk', async function() {
         asWindows();
-        const calls = lockFor('readFileSync', '.zip', 2);
+        // Even a file that stays locked for good does not matter
+        const calls = lockFor('readFileSync', '.zip', Infinity);
         const target = path.join(tempDir, 'out');
 
         await downloadAndExtract([`${baseUrl}/a.zip`], target, { stripRootFolder: true });
 
-        expect(calls.failed).to.equal(2);
+        expect(calls.failed).to.equal(0);
         expect(fs.readdirSync(target)).to.deep.equal(['index.php']);
+        expect(fs.readdirSync(tempDir)).to.deep.equal(['out']);
       });
 
       it('should wait for an extracted folder that cannot be moved yet', async function() {
@@ -273,21 +275,22 @@ describe('Downloads', function() {
 
       it('should explain a lock that does not go away, and leave nothing behind', async function() {
         asWindows();
-        const calls = lockFor('readFileSync', '.zip', Infinity);
+        const calls = lockFor('renameSync', 'product-1.0', Infinity);
         const target = path.join(tempDir, 'out');
 
-        const error = await downloadAndExtract([`${baseUrl}/a.zip`], target).then(() => null, failure => failure);
+        const error = await downloadAndExtract([`${baseUrl}/a.zip`], target, { stripRootFolder: true })
+          .then(() => null, failure => failure);
 
         expect(calls.failed).to.equal(5);
         expect(error.code).to.equal('EPERM');
-        expect(error.message).to.include(`${target}.zip`).and.to.include('אנטי-וירוס');
+        expect(error.message).to.include(target).and.to.include('אנטי-וירוס');
         expect(fs.readdirSync(tempDir)).to.deep.equal([]);
       });
 
       it('should not retry on other systems, where these errors mean a real permission problem', async function() {
-        const calls = lockFor('readFileSync', '.zip', Infinity);
+        const calls = lockFor('renameSync', 'product-1.0', Infinity);
 
-        const error = await downloadAndExtract([`${baseUrl}/a.zip`], path.join(tempDir, 'out'))
+        const error = await downloadAndExtract([`${baseUrl}/a.zip`], path.join(tempDir, 'out'), { stripRootFolder: true })
           .then(() => null, failure => failure);
 
         expect(calls.failed).to.equal(1);
@@ -296,9 +299,9 @@ describe('Downloads', function() {
 
       it('should not retry errors that are not locks', async function() {
         asWindows();
-        const calls = lockFor('readFileSync', '.zip', Infinity, 'ENOSPC');
+        const calls = lockFor('renameSync', 'product-1.0', Infinity, 'ENOSPC');
 
-        const error = await downloadAndExtract([`${baseUrl}/a.zip`], path.join(tempDir, 'out'))
+        const error = await downloadAndExtract([`${baseUrl}/a.zip`], path.join(tempDir, 'out'), { stripRootFolder: true })
           .then(() => null, failure => failure);
 
         expect(calls.failed).to.equal(1);

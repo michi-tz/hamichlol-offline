@@ -3,8 +3,6 @@ const os = require('os');
 const net = require('net');
 const path = require('path');
 const { execFile, spawn } = require('child_process');
-const { Readable } = require('stream');
-const { pipeline } = require('stream/promises');
 const AdmZip = require('adm-zip');
 const portfinder = require('portfinder');
 const mysql = require('mysql2/promise');
@@ -722,21 +720,23 @@ function getStatus() {
 // ---------------------------------------------------------------------------
 
 // Save `url` to `filePath`, following redirects.
-async function downloadFile(url, filePath) {
+// Download `url` into memory. The archive is never written to disk: on
+// Windows, a scanner can keep a freshly written archive with thousands of
+// entries (MediaWiki) locked for minutes, without reporting anything.
+async function downloadFile(url) {
   const response = await fetchImpl(url, { redirect: 'follow' });
   if (!response.ok || !response.body) {
     throw new Error(`HTTP ${response.status} ${response.statusText}`.trim());
   }
-  await pipeline(Readable.fromWeb(response.body), fs.createWriteStream(filePath));
+  return Buffer.from(await response.arrayBuffer());
 }
 
-async function downloadFirstAvailable(urls, zipPath) {
+async function downloadFirstAvailable(urls) {
   let lastError = null;
   for (const url of urls) {
     try {
       console.log(`Downloading ${url}`);
-      await downloadFile(url, zipPath);
-      return;
+      return await downloadFile(url);
     } catch (error) {
       console.error(`Download failed from ${url}: ${error.message}`);
       lastError = error;
@@ -748,11 +748,12 @@ async function downloadFirstAvailable(urls, zipPath) {
 // Download a zip and extract it into `targetDir`. Work happens in temporary
 // paths and the result is renamed into place only when complete, so an
 // interrupted download is never mistaken for a finished one.
-// On Windows an antivirus scanning a file that was just written keeps it
-// locked for a while; opening, moving or deleting it (or a folder holding it)
-// then fails with EPERM, EBUSY or EACCES. Such operations are retried.
+// On Windows a scanner (antivirus, internet filter) that checks files which
+// were just written keeps them locked for a while; moving or deleting them, or
+// a folder holding them, then fails with EPERM, EBUSY or EACCES. Such
+// operations are retried, for up to a minute.
 const LOCK_ERROR_CODES = new Set(['EPERM', 'EBUSY', 'EACCES']);
-const lockRetry = { attempts: 60, delayMs: 500 };
+const lockRetry = { attempts: 120, delayMs: 500 };
 
 async function retryWhileLocked(file, action) {
   for (let attempt = 1; ; attempt++) {
@@ -764,8 +765,8 @@ async function retryWhileLocked(file, action) {
       }
       if (attempt >= lockRetry.attempts) {
         const locked = new Error(
-          `אין גישה לקובץ ${file} (${error.code}). ייתכן שתוכנת אנטי-וירוס חוסמת אותו: ` +
-          'יש לבדוק ב"היסטוריית ההגנה" של אבטחת Windows ולנסות שוב'
+          `אין גישה לקובץ ${file} (${error.code}). ייתכן שתוכנה אחרת, למשל אנטי-וירוס ` +
+          'או מסנן אינטרנט, סורקת אותו. כדאי לנסות שוב בעוד כמה דקות'
         );
         locked.code = error.code;
         throw locked;
@@ -790,15 +791,14 @@ async function removeQuietly(target) {
 }
 
 async function downloadAndExtract(urls, targetDir, { stripRootFolder = false, prepare } = {}) {
-  const zipPath = `${targetDir}.zip`;
   const partialDir = `${targetDir}.partial`;
-  await removePath(zipPath);
+  // Left behind by earlier versions, which saved the archive before extracting it
+  await removeQuietly(`${targetDir}.zip`);
   await removePath(partialDir);
   fs.mkdirSync(partialDir, { recursive: true });
 
   try {
-    await downloadFirstAvailable(urls, zipPath);
-    const zipData = await retryWhileLocked(zipPath, () => fs.readFileSync(zipPath));
+    const zipData = await downloadFirstAvailable(urls);
     new AdmZip(zipData).extractAllTo(partialDir, true);
 
     let root = partialDir;
@@ -816,7 +816,6 @@ async function downloadAndExtract(urls, targetDir, { stripRootFolder = false, pr
     await removePath(targetDir);
     await retryWhileLocked(targetDir, () => fs.renameSync(root, targetDir));
   } finally {
-    await removeQuietly(zipPath);
     await removeQuietly(partialDir);
   }
 }
