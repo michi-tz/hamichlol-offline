@@ -1,6 +1,6 @@
 const { app, BrowserWindow, ipcMain, net } = require('electron');
 const path = require('path');
-const { setDataPath, setFetch, isDevMode, getStatus, cleanupStaleProcesses, downloadServers, installMediaWiki, startServers, stopServers } = require('./server-manager');
+const { setDataPath, setFetch, isDevMode, removeDevStandIns, getStatus, cleanupStaleProcesses, downloadServers, installMediaWiki, startServers, stopServers } = require('./server-manager');
 
 let mainWindow;
 let isQuitting = false;
@@ -36,7 +36,10 @@ function createWindow() {
 }
 
 function setupApp() {
-  app.whenReady().then(() => {
+  app.whenReady().then(async () => {
+    // Before the page asks for the status: stand-ins an earlier version's dev
+    // mode left in the real data folder would pass for downloaded servers
+    await removeDevStandIns().catch(error => console.error('Failed to remove dev mode leftovers:', error));
     // Stop servers left running by a previous run that crashed or was killed
     cleanupStaleProcesses().catch(error => console.error('Failed to clean up leftover servers:', error));
     createWindow();

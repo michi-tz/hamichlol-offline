@@ -886,12 +886,23 @@ async function copyMediaWiki(sourceDir, targetDir) {
   }
 }
 
+// Contents of the stand-in files dev mode writes instead of real downloads.
+// removeDevStandIns() recognises them by the same values.
+const DEV_STAND_INS = {
+  php: 'MOCK PHP EXE',
+  mariadb: 'MOCK MARIADB EXE',
+  mediaWiki: '<?php echo "Mock MediaWiki"; ?>',
+  installer: '<?php echo "Mock Installer"; ?>',
+  // Start of the stand-in LocalSettings.php; the rest holds the chosen names
+  localSettings: '<?php\n// Mock LocalSettings.php for development\n'
+};
+
 function createMockServers() {
-  const { phpDir, phpIni, mariadbDir, dbDataDir, mediaWikiPath } = getPaths();
+  const { phpDir, phpExe, phpIni, mariadbDir, dbDataDir, mediaWikiPath } = getPaths();
 
   if (!fs.existsSync(phpIni)) {
     fs.mkdirSync(phpDir, { recursive: true });
-    fs.writeFileSync(path.join(phpDir, 'php.exe'), 'MOCK PHP EXE');
+    fs.writeFileSync(phpExe, DEV_STAND_INS.php);
     fs.writeFileSync(phpIni, PHP_EXTENSIONS.map(extension => `extension=${extension}`).join('\n'));
   }
 
@@ -899,7 +910,7 @@ function createMockServers() {
   if (!fs.existsSync(binDir)) {
     fs.mkdirSync(binDir, { recursive: true });
     for (const kind of Object.keys(MARIADB_BINARIES)) {
-      fs.writeFileSync(path.join(binDir, MARIADB_BINARIES[kind][0]), 'MOCK MARIADB EXE');
+      fs.writeFileSync(path.join(binDir, MARIADB_BINARIES[kind][0]), DEV_STAND_INS.mariadb);
     }
   }
 
@@ -907,8 +918,74 @@ function createMockServers() {
 
   if (!fs.existsSync(path.join(mediaWikiPath, 'index.php'))) {
     fs.mkdirSync(path.join(mediaWikiPath, 'maintenance'), { recursive: true });
-    fs.writeFileSync(path.join(mediaWikiPath, 'index.php'), '<?php echo "Mock MediaWiki"; ?>');
-    fs.writeFileSync(path.join(mediaWikiPath, 'maintenance', 'install.php'), '<?php echo "Mock Installer"; ?>');
+    fs.writeFileSync(path.join(mediaWikiPath, 'index.php'), DEV_STAND_INS.mediaWiki);
+    fs.writeFileSync(path.join(mediaWikiPath, 'maintenance', 'install.php'), DEV_STAND_INS.installer);
+  }
+}
+
+// Whether `file` starts with `marker`, or with `exact` holds nothing else.
+// Reads only that many bytes: a real server program is a large file.
+function fileStartsWith(file, marker, { exact = false } = {}) {
+  const expected = Buffer.from(marker);
+  let fd = null;
+  try {
+    fd = fs.openSync(file, 'r');
+    if (exact && fs.fstatSync(fd).size !== expected.length) {
+      return false;
+    }
+    const actual = Buffer.alloc(expected.length);
+    return fs.readSync(fd, actual, 0, expected.length, 0) === expected.length && actual.equals(expected);
+  } catch (error) {
+    // Missing, a folder or unreadable: not a stand-in
+    return false;
+  } finally {
+    if (fd !== null) {
+      fs.closeSync(fd);
+    }
+  }
+}
+
+// The empty folder dev mode creates in place of an initialized database. A
+// real database is never empty: it is created elsewhere and moved into place.
+function isDevStandInDatabase(dbDataDir) {
+  try {
+    const entries = fs.readdirSync(dbDataDir);
+    return entries.length === 1 && entries[0] === 'mysql' && fs.readdirSync(path.join(dbDataDir, 'mysql')).length === 0;
+  } catch (error) {
+    return false;
+  }
+}
+
+// Earlier versions ran dev mode in the real data folder. Its stand-ins there
+// look like downloaded servers and an installed wiki, so starting fails and the
+// real programs are never downloaded. Remove them, and only them; run once
+// before the data folder is used. Never in dev mode, which needs them.
+async function removeDevStandIns() {
+  if (isDevMode()) {
+    return;
+  }
+  const { phpDir, phpExe, mariadbDir, dbDataDir, mediaWikiPath, localSettings } = getPaths();
+  const remove = async (target, what) => {
+    await removePath(target);
+    console.log(`Removed dev mode's stand-in ${what}: ${target}`);
+  };
+
+  if (fileStartsWith(phpExe, DEV_STAND_INS.php, { exact: true })) {
+    await remove(phpDir, 'PHP');
+  }
+  if (fileStartsWith(path.join(mariadbDir, 'bin', MARIADB_BINARIES.server[0]), DEV_STAND_INS.mariadb, { exact: true })) {
+    await remove(mariadbDir, 'MariaDB');
+  }
+  if (isDevStandInDatabase(dbDataDir)) {
+    await remove(dbDataDir, 'database');
+  }
+  if (fileStartsWith(localSettings, DEV_STAND_INS.localSettings)) {
+    await remove(localSettings, 'LocalSettings.php');
+  }
+  // A real LocalSettings.php next to it is kept, and so is its folder
+  if (fileStartsWith(path.join(mediaWikiPath, 'index.php'), DEV_STAND_INS.mediaWiki, { exact: true }) &&
+      !fs.existsSync(localSettings)) {
+    await remove(mediaWikiPath, 'MediaWiki');
   }
 }
 
@@ -1095,7 +1172,7 @@ async function installMediaWiki(rawConfig) {
 
     fs.writeFileSync(
       localSettings,
-      `<?php\n// Mock LocalSettings.php for development\n$wgSitename = ${phpString(wikiName)};\n$wgDBname = ${phpString(dbName)};\n`
+      `${DEV_STAND_INS.localSettings}$wgSitename = ${phpString(wikiName)};\n$wgDBname = ${phpString(dbName)};\n`
     );
 
     return true;
@@ -1267,6 +1344,7 @@ module.exports = {
   getStatus,
   cleanupStaleProcesses,
   isDevMode,
+  removeDevStandIns,
   validateConfig,
   buildDatabaseSetupQueries,
   patchLocalSettings,

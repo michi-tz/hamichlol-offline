@@ -173,6 +173,18 @@ describe('Electron main process', function() {
       expect(serverManager.getPaths().dataPath).to.equal(path.join(tempDir, 'userData', 'data'));
     });
 
+    it('should remove stand-ins an earlier version\'s dev mode left in the real data', async function() {
+      process.env.DEV_MODE = 'false';
+      const { DOWNLOADS } = require('../src/versions');
+      const phpDir = path.join(tempDir, 'userData', 'data', 'server', `php-${DOWNLOADS.php.version}`);
+      fs.mkdirSync(phpDir, { recursive: true });
+      fs.writeFileSync(path.join(phpDir, 'php.exe'), 'MOCK PHP EXE');
+
+      await loadMain();
+
+      expect(fs.existsSync(phpDir)).to.be.false;
+    });
+
     it('should keep dev mode\'s stand-in files apart from the real data', async function() {
       // In the real data folder they would be taken for downloaded servers
       await loadMain();
