@@ -554,10 +554,12 @@ describe('Installed software detection', function() {
     expect(systemTools.findSystemPhp([exe])).to.deep.equal({ exe, version: '8.3.6', usable: true, reason: null });
   });
 
-  it('should reject a PHP that is too old, and say why', function() {
-    const result = systemTools.findSystemPhp([fakePhp('php-old', '7.4.33', systemTools.REQUIRED_PHP_EXTENSIONS)]);
-    expect(result.usable).to.be.false;
-    expect(result.reason).to.include(systemTools.MIN_VERSIONS.php);
+  it('should reject a PHP of another branch, older or newer, and say which is needed', function() {
+    for (const version of ['7.4.33', '8.2.30', '8.4.1', '8.5.4']) {
+      const result = systemTools.findSystemPhp([fakePhp(`php-${version}`, version, systemTools.REQUIRED_PHP_EXTENSIONS)]);
+      expect(result.usable, version).to.be.false;
+      expect(result.reason, version).to.include(systemTools.PHP_BRANCH);
+    }
   });
 
   it('should reject a PHP with missing extensions, and name them', function() {
@@ -570,7 +572,7 @@ describe('Installed software detection', function() {
   it('should skip unusable candidates and files that are not PHP', function() {
     const broken = writeScript('php-broken', 'exit 1');
     const old = fakePhp('php-old2', '8.0.30', systemTools.REQUIRED_PHP_EXTENSIONS);
-    const good = fakePhp('php-good2', '8.4.1', systemTools.REQUIRED_PHP_EXTENSIONS);
+    const good = fakePhp('php-good2', '8.3.1', systemTools.REQUIRED_PHP_EXTENSIONS);
     expect(systemTools.findSystemPhp([broken, old, good]).exe).to.equal(good);
     expect(systemTools.findSystemPhp([]) ).to.be.null;
   });
@@ -829,7 +831,7 @@ describe('Real mode with installed software', function() {
       systemTools.resetCache();
       expect(getStatus().tools.mediawiki.source).to.equal('download');
 
-      fs.writeFileSync(path.join(source, 'composer.json'), JSON.stringify({ require: { php: `>=${systemTools.MIN_VERSIONS.php}` } }));
+      fs.writeFileSync(path.join(source, 'composer.json'), JSON.stringify({ require: { php: '>=8.1.0' } }));
       systemTools.resetCache();
       expect(getStatus().tools.mediawiki.source).to.equal('system');
     } finally {
