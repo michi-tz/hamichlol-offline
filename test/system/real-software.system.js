@@ -46,10 +46,10 @@ describe('Real installed software', function() {
     const cacheDir = path.join(getPaths().mediaWikiPath, 'cache');
     for (const name of fs.existsSync(cacheDir) ? fs.readdirSync(cacheDir) : []) {
       if (name.endsWith('.log')) {
-        logs.push(`${name}: ${fs.readFileSync(path.join(cacheDir, name), 'utf8').slice(-1500)}`);
+        logs.push(`${name}: ${fs.readFileSync(path.join(cacheDir, name), 'utf8').slice(-6000)}`);
       }
     }
-    return [`page: ${text.slice(0, 800)}`, ...logs].join('\n');
+    return [`page: ${text.slice(-400)}`, ...logs].join('\n');
   }
 
   const api = async query => (await fetch(`http://127.0.0.1:${ports.phpPort}/api.php?format=json&${query}`)).json();
