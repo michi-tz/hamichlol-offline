@@ -247,6 +247,7 @@ describe('Downloads', function() {
       });
 
       const asWindows = () => Object.defineProperty(process, 'platform', { value: 'win32' });
+      const asLinux = () => Object.defineProperty(process, 'platform', { value: 'linux' });
 
       it('should never need to read the archive back from disk', async function() {
         asWindows();
@@ -288,6 +289,7 @@ describe('Downloads', function() {
       });
 
       it('should not retry on other systems, where these errors mean a real permission problem', async function() {
+        asLinux();
         const calls = lockFor('renameSync', 'product-1.0', Infinity);
 
         const error = await downloadAndExtract([`${baseUrl}/a.zip`], path.join(tempDir, 'out'), { stripRootFolder: true })
