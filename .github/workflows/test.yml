@@ -32,7 +32,9 @@ jobs:
 
   integration:
     name: Real software and app window (Ubuntu)
-    runs-on: ubuntu-latest
+    # Pinned: the packages of the newer image pair MediaWiki 1.43 with PHP 8.5,
+    # where every wiki page fails inside MediaWiki's own parser.
+    runs-on: ubuntu-24.04
     timeout-minutes: 30
     steps:
       - uses: actions/checkout@v5
