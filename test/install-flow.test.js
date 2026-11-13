@@ -114,6 +114,8 @@ describe('Real installation flow with fake servers', function() {
       expect(args).to.include(`--installdbpass=${config.dbPassword}`);
       expect(args).to.include(`--pass=${config.adminPassword}`);
       expect(args).to.include('--scriptpath=');
+      // A Hebrew wiki (content and interface language)
+      expect(args).to.include('--lang=he');
       // The site name and the administrator come last, each as one argument
       expect(args.slice(-2)).to.deep.equal([config.wikiName, config.adminUser]);
       // Nothing was interpreted by a shell
@@ -193,6 +195,57 @@ describe('Real installation flow with fake servers', function() {
       expect(getStatus()).to.include({ installed: false, running: false });
       expect(queries().slice(-1)).to.deep.equal(['SHUTDOWN']);
       expect(fs.existsSync(getPaths().runStateFile)).to.be.false;
+    });
+
+    it('should install a Hebrew wiki', async function() {
+      await installMediaWiki(VALID_CONFIG);
+
+      expect(fs.readFileSync(getPaths().localSettings, 'utf8')).to.include('$wgLanguageCode = "he";');
+    });
+
+    it('should never put the passwords into the installer\'s error', async function() {
+      process.env.FAKE_PHP_INSTALL_FAILS = '1';
+      const config = { ...VALID_CONFIG, dbPassword: 'secret-db-pass', adminPassword: 'secret-admin-pass' };
+      const error = await installMediaWiki(config).then(() => null, failure => failure);
+      delete process.env.FAKE_PHP_INSTALL_FAILS;
+
+      expect(error.message).to.include('אפשר לתקן את ההגדרות ולנסות שוב');
+      expect(error.message).to.include('database refused the connection');
+      expect(error.message).to.not.include('secret-db-pass');
+      expect(error.message).to.not.include('secret-admin-pass');
+      expect(error.message).to.not.include('--pass');
+    });
+
+    describe('with the common password list of MediaWiki', function() {
+      const commonPasswordsFile = () =>
+        path.join(getPaths().mediaWikiPath, 'vendor', 'wikimedia', 'common-passwords', 'src', 'common.php');
+      const writeList = content => {
+        fs.mkdirSync(path.dirname(commonPasswordsFile()), { recursive: true });
+        fs.writeFileSync(commonPasswordsFile(), content);
+      };
+      const LIST = ['<?php return [', ...Array.from({ length: 20 }, (_, i) => `'common-password-${i}' => 1,`), '];', ''].join('\n');
+
+      it('should refuse a common password before creating the database', async function() {
+        writeList(LIST);
+        const error = await installMediaWiki({ ...VALID_CONFIG, adminPassword: 'common-password-7' })
+          .then(() => null, failure => failure);
+
+        expect(error.message).to.include('נפוצות');
+        expect(fs.existsSync(queriesLog())).to.be.false;
+        expect(fs.existsSync(path.join(getPaths().mediaWikiPath, 'install-args.json'))).to.be.false;
+      });
+
+      it('should accept passwords that are not on the list', async function() {
+        writeList(LIST);
+        await installMediaWiki(VALID_CONFIG);
+        expect(getStatus().installed).to.be.true;
+      });
+
+      it('should skip only this check when the list is in an unknown format', async function() {
+        writeList('<?php return json_decode( file_get_contents( "common.json" ) );');
+        await installMediaWiki({ ...VALID_CONFIG, adminPassword: 'common-password-7' });
+        expect(getStatus().installed).to.be.true;
+      });
     });
 
     it('should allow another attempt after a failed installation', async function() {
@@ -329,6 +382,21 @@ describe('Real installation flow with fake servers', function() {
       expect(fs.existsSync(getPaths().runStateFile)).to.be.false;
       // The database was shut down cleanly, not killed
       expect(queries().slice(-1)).to.deep.equal(['SHUTDOWN']);
+    });
+
+    it('should announce a server that exits by itself', async function() {
+      await startServers();
+      const { php } = readJson(getPaths().runStateFile);
+      let changes = 0;
+      const listener = () => { changes += 1; };
+      serverManager.events.on('change', listener);
+      try {
+        process.kill(php.pid, 'SIGKILL');
+        expect(await waitFor(() => changes > 0)).to.be.true;
+        expect(getStatus().running).to.be.false;
+      } finally {
+        serverManager.events.removeListener('change', listener);
+      }
     });
 
     it('should recover on the next start after the app was killed', async function() {

@@ -38,6 +38,20 @@ describe('Real installed software', function() {
   let restoreEnv;
   let ports;
 
+  // What a failed page said, and what MediaWiki logged about it, so a failure
+  // in CI explains itself.
+  function describeFailure(html) {
+    const text = html.replace(/<(script|style)[\s\S]*?<\/\1>/g, ' ').replace(/<[^>]+>/g, ' ').replace(/\s+/g, ' ').trim();
+    const logs = [];
+    const cacheDir = path.join(getPaths().mediaWikiPath, 'cache');
+    for (const name of fs.existsSync(cacheDir) ? fs.readdirSync(cacheDir) : []) {
+      if (name.endsWith('.log')) {
+        logs.push(`${name}: ${fs.readFileSync(path.join(cacheDir, name), 'utf8').slice(-6000)}`);
+      }
+    }
+    return [`page: ${text.slice(-400)}`, ...logs].join('\n');
+  }
+
   const api = async query => (await fetch(`http://127.0.0.1:${ports.phpPort}/api.php?format=json&${query}`)).json();
 
   before(async function() {
@@ -121,7 +135,7 @@ describe('Real installed software', function() {
 
     const response = await fetch(`http://127.0.0.1:${ports.phpPort}/index.php`);
     const html = await response.text();
-    expect(response.status).to.equal(200);
+    expect(response.status, describeFailure(html)).to.equal(200);
     expect(html).to.include(CONFIG.wikiName);
     expect(getStatus()).to.include({ running: true, phpPort: ports.phpPort, mysqlPort: ports.mysqlPort });
   });
@@ -138,6 +152,8 @@ describe('Real installed software', function() {
 
     expect(query.general.sitename).to.equal(CONFIG.wikiName);
     expect(query.general.dbtype).to.equal('mysql');
+    // New wikis are Hebrew
+    expect(query.general.lang).to.equal('he');
     // The address is detected from the request, not fixed at install time
     expect(query.general.server).to.equal(`http://127.0.0.1:${ports.phpPort}`);
   });
@@ -200,7 +216,7 @@ describe('Real installed software', function() {
     const { query } = await api('action=query&meta=siteinfo&siprop=statistics');
     expect(query.statistics.pages).to.be.at.least(1);
     const page = await fetch(`http://127.0.0.1:${ports.phpPort}/index.php?title=Special:Version`);
-    expect(page.status).to.equal(200);
+    expect(page.status, describeFailure(await page.text())).to.equal(200);
 
     await stopServers();
   });
