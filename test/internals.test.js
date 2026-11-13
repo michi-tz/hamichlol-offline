@@ -27,6 +27,12 @@ const {
   getPaths,
   dbServerArgs,
   cleanupStaleProcesses,
+  getStatus,
+  downloadServers,
+  installMediaWiki,
+  startServers,
+  stopServers,
+  removeDevStandIns,
   validateConfig,
   buildDatabaseSetupQueries,
   patchLocalSettings,
@@ -156,6 +162,29 @@ describe('Server manager building blocks', function() {
     it('should never claim this test process or the init process', async function() {
       expect(await identifyProcess({ pid: process.pid, exe: process.execPath, marker: MARKER })).to.equal('gone');
       expect(await identifyProcess({ pid: 1, exe: process.execPath, marker: MARKER })).to.equal('gone');
+    });
+  });
+
+  // Runs on every system, Windows included: there the failure is reported
+  // differently (thrown at once, as "spawn UNKNOWN") than on Linux and macOS.
+  describe('A server program that cannot be run', function() {
+    it('should name the program instead of reporting a bare "spawn" error', async function() {
+      const { mariadbDir, mediaWikiPath, localSettings, dbDataDir, runStateFile } = getPaths();
+      // E.g. a stand-in file left in the data folder by dev mode
+      const server = path.join(mariadbDir, 'bin', 'mariadbd.exe');
+      fs.mkdirSync(path.dirname(server), { recursive: true });
+      fs.writeFileSync(server, 'MOCK MARIADB EXE', { mode: 0o644 });
+      fs.mkdirSync(path.join(dbDataDir, 'mysql'), { recursive: true });
+      fs.mkdirSync(mediaWikiPath, { recursive: true });
+      fs.writeFileSync(path.join(mediaWikiPath, 'index.php'), '');
+      fs.writeFileSync(localSettings, '');
+
+      const error = await startServers().then(() => null, failure => failure);
+
+      expect(error).to.be.an('error');
+      expect(error.message).to.include('MySQL could not be started').and.to.include(server);
+      expect(getStatus().running).to.be.false;
+      expect(fs.existsSync(runStateFile)).to.be.false;
     });
   });
 
@@ -544,45 +573,45 @@ describe('Server manager building blocks', function() {
       fs.writeFileSync(path.join(source, 'extensions', 'Cite', 'extension.json'), '{}');
     });
 
-    it('should copy the program files', function() {
-      copyMediaWiki(source, target);
+    it('should copy the program files', async function() {
+      await copyMediaWiki(source, target);
 
       expect(fs.readFileSync(path.join(target, 'index.php'), 'utf8')).to.equal('index');
       expect(fs.existsSync(path.join(target, 'extensions', 'Cite', 'extension.json'))).to.be.true;
       expect(fs.existsSync(path.join(target, 'skins'))).to.be.true;
     });
 
-    it('should leave out the existing wiki\'s settings, uploads and cache', function() {
-      copyMediaWiki(source, target);
+    it('should leave out the existing wiki\'s settings, uploads and cache', async function() {
+      await copyMediaWiki(source, target);
 
       expect(fs.existsSync(path.join(target, 'LocalSettings.php'))).to.be.false;
       expect(fs.readdirSync(path.join(target, 'images'))).to.deep.equal([]);
       expect(fs.readdirSync(path.join(target, 'cache'))).to.deep.equal([]);
     });
 
-    it('should only leave out those names at the top level', function() {
+    it('should only leave out those names at the top level', async function() {
       fs.mkdirSync(path.join(source, 'resources', 'images'), { recursive: true });
       fs.writeFileSync(path.join(source, 'resources', 'images', 'logo.svg'), 'logo');
       fs.mkdirSync(path.join(source, 'includes', 'cache'));
       fs.writeFileSync(path.join(source, 'includes', 'cache', 'CacheHelper.php'), 'code');
       fs.writeFileSync(path.join(source, 'includes', 'LocalSettings.php'), 'code');
 
-      copyMediaWiki(source, target);
+      await copyMediaWiki(source, target);
 
       expect(fs.existsSync(path.join(target, 'resources', 'images', 'logo.svg'))).to.be.true;
       expect(fs.existsSync(path.join(target, 'includes', 'cache', 'CacheHelper.php'))).to.be.true;
       expect(fs.existsSync(path.join(target, 'includes', 'LocalSettings.php'))).to.be.true;
     });
 
-    it('should not modify the installation it copies from', function() {
-      copyMediaWiki(source, target);
+    it('should not modify the installation it copies from', async function() {
+      await copyMediaWiki(source, target);
 
       expect(fs.readFileSync(path.join(source, 'LocalSettings.php'), 'utf8')).to.equal('secret settings');
       expect(fs.readFileSync(path.join(source, 'images', 'a', 'photo.jpg'), 'utf8')).to.equal('photo');
       expect(fs.readFileSync(path.join(source, 'cache', 'l10n.cdb'), 'utf8')).to.equal('cache');
     });
 
-    it('should turn symlinks into real files and folders', function() {
+    it('should turn symlinks into real files and folders', async function() {
       if (process.platform === 'win32') {
         this.skip(); // creating symlinks needs special rights there
       }
@@ -592,7 +621,7 @@ describe('Server manager building blocks', function() {
       fs.symlinkSync(path.join(elsewhere, 'Gadgets'), path.join(source, 'extensions', 'Gadgets'));
       fs.symlinkSync(path.join(source, 'index.php'), path.join(source, 'alias.php'));
 
-      copyMediaWiki(source, target);
+      await copyMediaWiki(source, target);
 
       expect(fs.lstatSync(path.join(target, 'extensions', 'Gadgets')).isSymbolicLink()).to.be.false;
       expect(fs.existsSync(path.join(target, 'extensions', 'Gadgets', 'extension.json'))).to.be.true;
@@ -600,7 +629,7 @@ describe('Server manager building blocks', function() {
       expect(fs.readFileSync(path.join(target, 'alias.php'), 'utf8')).to.equal('index');
     });
 
-    it('should skip a top-level LocalSettings.php symlink that points nowhere', function() {
+    it('should skip a top-level LocalSettings.php symlink that points nowhere', async function() {
       if (process.platform === 'win32') {
         this.skip();
       }
@@ -608,27 +637,28 @@ describe('Server manager building blocks', function() {
       fs.rmSync(path.join(source, 'LocalSettings.php'));
       fs.symlinkSync('/etc/mediawiki/does-not-exist.php', path.join(source, 'LocalSettings.php'));
 
-      copyMediaWiki(source, target);
+      await copyMediaWiki(source, target);
 
       expect(fs.existsSync(path.join(target, 'index.php'))).to.be.true;
       expect(fs.existsSync(path.join(target, 'LocalSettings.php'))).to.be.false;
     });
 
-    it('should replace an incomplete earlier copy', function() {
+    it('should replace an incomplete earlier copy', async function() {
       fs.mkdirSync(target);
       fs.writeFileSync(path.join(target, 'stale.php'), 'old');
       fs.mkdirSync(`${target}.partial`);
       fs.writeFileSync(path.join(`${target}.partial`, 'half.php'), 'x');
 
-      copyMediaWiki(source, target);
+      await copyMediaWiki(source, target);
 
       expect(fs.existsSync(path.join(target, 'stale.php'))).to.be.false;
       expect(fs.existsSync(`${target}.partial`)).to.be.false;
       expect(fs.existsSync(path.join(target, 'index.php'))).to.be.true;
     });
 
-    it('should leave no half-made copy when copying fails', function() {
-      expect(() => copyMediaWiki(path.join(tempDir, 'missing'), target)).to.throw();
+    it('should leave no half-made copy when copying fails', async function() {
+      const error = await copyMediaWiki(path.join(tempDir, 'missing'), target).then(() => null, failure => failure);
+      expect(error).to.be.an('error');
 
       expect(fs.existsSync(target)).to.be.false;
       expect(fs.existsSync(`${target}.partial`)).to.be.false;
@@ -733,6 +763,107 @@ describe('Server manager building blocks', function() {
 
       expect(() => patchLocalSettings(file)).to.throw('wgDBserver');
       expect(fs.readFileSync(file, 'utf8')).to.equal(content);
+    });
+  });
+
+  describe('Leftovers of dev mode in the real data folder', function() {
+    // Earlier versions ran dev mode in the same folder as normal mode
+    async function runDevMode() {
+      process.env.DEV_MODE = 'true';
+      await downloadServers();
+      await installMediaWiki(VALID_CONFIG);
+      process.env.DEV_MODE = 'false';
+    }
+
+    beforeEach(function() {
+      // Software installed on the test computer must not change the outcome
+      process.env.HAMICHLOL_USE_SYSTEM = 'false';
+    });
+
+    afterEach(function() {
+      delete process.env.HAMICHLOL_USE_SYSTEM;
+    });
+
+    it('should remove them, so the real servers are downloaded and the wiki installed', async function() {
+      await runDevMode();
+      // What normal mode saw before: servers to start that are only text files
+      expect(getStatus()).to.include({ downloaded: true, installed: true });
+
+      await removeDevStandIns();
+
+      const status = getStatus();
+      expect(status).to.include({ downloaded: false, installed: false, running: false });
+      expect(status.tools.php.source).to.be.null;
+      expect(status.tools.database.source).to.be.null;
+      expect(status.tools.mediawiki.source).to.equal('download');
+      const { phpDir, mariadbDir, dbDataDir, mediaWikiPath } = getPaths();
+      for (const dir of [phpDir, mariadbDir, dbDataDir, mediaWikiPath]) {
+        expect(fs.existsSync(dir), dir).to.be.false;
+      }
+    });
+
+    it('should leave real servers, a real database and a real wiki untouched', async function() {
+      const { phpExe, phpIni, mariadbDir, dbDataDir, mediaWikiPath, localSettings } = getPaths();
+      const mariadbd = path.join(mariadbDir, 'bin', 'mariadbd.exe');
+      // Real programs are large binaries; even one that happens to start with
+      // the stand-in's text is not a stand-in
+      const files = {
+        [phpExe]: Buffer.concat([Buffer.from('MOCK PHP EXE'), Buffer.alloc(4 * 1024 * 1024, 0x90)]),
+        [phpIni]: 'extension=mysqli\n',
+        [mariadbd]: Buffer.concat([Buffer.from('MZ'), Buffer.alloc(4 * 1024 * 1024, 0x00)]),
+        [path.join(dbDataDir, 'mysql', 'db.frm')]: 'table',
+        [path.join(mediaWikiPath, 'index.php')]: '<?php\nrequire __DIR__ . \'/includes/WebStart.php\';\n',
+        [localSettings]: '<?php\n# This file was automatically generated by the MediaWiki installer.\n'
+      };
+      for (const [file, content] of Object.entries(files)) {
+        fs.mkdirSync(path.dirname(file), { recursive: true });
+        fs.writeFileSync(file, content);
+      }
+
+      await removeDevStandIns();
+
+      for (const [file, content] of Object.entries(files)) {
+        expect(fs.readFileSync(file), file).to.deep.equal(Buffer.from(content));
+      }
+    });
+
+    it('should keep a real LocalSettings.php even next to a stand-in MediaWiki', async function() {
+      await runDevMode();
+      const { localSettings, mediaWikiPath } = getPaths();
+      const real = '<?php\n# This file was automatically generated by the MediaWiki installer.\n';
+      fs.writeFileSync(localSettings, real);
+
+      await removeDevStandIns();
+
+      expect(fs.readFileSync(localSettings, 'utf8')).to.equal(real);
+      expect(fs.existsSync(path.join(mediaWikiPath, 'index.php'))).to.be.true;
+    });
+
+    it('should leave dev mode its stand-ins and keep it working', async function() {
+      await runDevMode();
+      process.env.DEV_MODE = 'true';
+
+      await removeDevStandIns();
+
+      expect(getStatus()).to.include({ downloaded: true, installed: true, devMode: true });
+      try {
+        const { phpPort } = await startServers();
+        expect(phpPort).to.be.a('number');
+        expect(getStatus().running).to.be.true;
+      } finally {
+        await stopServers();
+      }
+    });
+
+    it('should do nothing when run again or on a missing folder', async function() {
+      await runDevMode();
+      await removeDevStandIns();
+      await removeDevStandIns();
+      expect(getStatus()).to.include({ downloaded: false, installed: false });
+
+      setDataPath(path.join(tempDir, 'does-not-exist'));
+      await removeDevStandIns();
+      expect(fs.existsSync(path.join(tempDir, 'does-not-exist'))).to.be.false;
     });
   });
 });

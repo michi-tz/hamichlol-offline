@@ -769,7 +769,6 @@
 
     // What the main process is doing, as last reported
     let state = null;
-    let busyMessage = null;
 
     const ERROR_PREFIXES = {
       download: 'שגיאה בהתקנת השרתים',
@@ -899,7 +898,7 @@
       indicator.title = running ? `PHP: ${state.phpPort}, MySQL: ${state.mysqlPort}` : '';
 
       if (busy) {
-        setStatus(busyMessage || BUSY_MESSAGES[busy] || 'עובד...', 'busy');
+        setStatus(BUSY_MESSAGES[busy] || 'עובד...', 'busy');
       } else if (error) {
         setStatus(`${ERROR_PREFIXES[error.action] || 'שגיאה'}: ${error.message}`, 'error');
       } else if (running) {
@@ -911,9 +910,6 @@
       } else {
         setStatus('המערכת מותקנת. אפשר להפעיל את השרתים');
       }
-      if (!busy) {
-        busyMessage = null;
-      }
       return state;
     }
 
@@ -922,16 +918,10 @@
       return render(newState || await ipcRenderer.invoke('get-status'));
     }
 
-    // Progress messages of the operation that is running
-    ipcRenderer.on('status-update', (event, message) => {
-      busyMessage = message;
-      if (state && state.busy) {
-        setStatus(message, 'busy');
-      }
-    });
-
     // The main process changed something (also through the menu, or because a
-    // server stopped by itself)
+    // server stopped by itself). The status line is drawn from this state
+    // alone: the main process sends no separate status texts, so a text can
+    // never arrive after the state it belongs to and leave a stale status.
     ipcRenderer.on('state-changed', (event, newState) => {
       refreshView(newState);
     });

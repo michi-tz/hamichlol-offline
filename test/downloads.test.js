@@ -39,12 +39,19 @@ describe('Downloads', function() {
   let baseUrl;
   let files;       // URL path -> zip buffer (missing = 404)
   let requests;    // URL paths requested, in order
+  let redirects;   // URL path -> path it redirects to
+  let truncated;   // URL paths whose download is cut off half-way
   let restoreEnv;
   let savedUrls;
 
   before(async function() {
     server = http.createServer((request, response) => {
       requests.push(request.url);
+      if (redirects[request.url]) {
+        response.writeHead(302, { Location: redirects[request.url] });
+        response.end();
+        return;
+      }
       const body = files[request.url];
       if (!body) {
         response.statusCode = 404;
@@ -52,6 +59,12 @@ describe('Downloads', function() {
         return;
       }
       response.setHeader('Content-Type', 'application/zip');
+      if (truncated.has(request.url)) {
+        // Promise the whole file, send half and cut the connection
+        response.setHeader('Content-Length', body.length);
+        response.write(body.subarray(0, Math.floor(body.length / 2)), () => response.destroy());
+        return;
+      }
       response.end(body);
     });
     await new Promise(resolve => server.listen(0, '127.0.0.1', resolve));
@@ -69,6 +82,8 @@ describe('Downloads', function() {
     setDataPath(tempDir);
     files = {};
     requests = [];
+    redirects = {};
+    truncated = new Set();
     savedUrls = {};
     for (const [name, entry] of Object.entries(DOWNLOADS)) {
       savedUrls[name] = entry.urls;
@@ -161,6 +176,139 @@ describe('Downloads', function() {
 
       expect(error).to.be.an('error');
       expect(fs.readdirSync(tempDir)).to.deep.equal([]);
+    });
+
+    it('should follow redirects', async function() {
+      files['/real.zip'] = zipOf({ 'one.txt': '1' });
+      redirects['/moved.zip'] = '/real.zip';
+      const target = path.join(tempDir, 'out');
+
+      await downloadAndExtract([`${baseUrl}/moved.zip`], target);
+
+      expect(requests).to.deep.equal(['/moved.zip', '/real.zip']);
+      expect(fs.existsSync(path.join(target, 'one.txt'))).to.be.true;
+    });
+
+    it('should say which HTTP error a failed download got', async function() {
+      const error = await downloadAndExtract([`${baseUrl}/gone.zip`], path.join(tempDir, 'out'))
+        .then(() => null, failure => failure);
+
+      expect(error.message).to.include('404');
+    });
+
+    it('should fail when the connection drops in the middle of a file', async function() {
+      truncated.add('/a.zip');
+      files['/a.zip'] = zipOf({ 'one.txt': '1' });
+      const target = path.join(tempDir, 'out');
+
+      const error = await downloadAndExtract([`${baseUrl}/a.zip`], target).then(() => null, failure => failure);
+
+      expect(error).to.be.an('error');
+      expect(fs.readdirSync(tempDir)).to.deep.equal([]);
+    });
+
+    // An antivirus scanning a file that was just written can keep it locked
+    describe('Files locked by another program (Windows)', function() {
+      let platform;
+      let restoreFs;
+      let savedRetry;
+
+      // Make fs[method] fail with `code` for paths ending in `suffix`, `times` times
+      function lockFor(method, suffix, times, code = 'EPERM') {
+        const original = fs[method];
+        const calls = { failed: 0 };
+        fs[method] = function(target, ...rest) {
+          if (String(target).endsWith(suffix) && calls.failed < times) {
+            calls.failed += 1;
+            throw Object.assign(new Error(`${code}: operation not permitted, ${method} '${target}'`), { code });
+          }
+          return original.call(this, target, ...rest);
+        };
+        restoreFs = () => {
+          fs[method] = original;
+        };
+        return calls;
+      }
+
+      beforeEach(function() {
+        platform = Object.getOwnPropertyDescriptor(process, 'platform');
+        savedRetry = { ..._internal.lockRetry };
+        Object.assign(_internal.lockRetry, { attempts: 5, delayMs: 10 });
+        files['/a.zip'] = zipOf({ 'product-1.0/index.php': 'x' });
+      });
+
+      afterEach(function() {
+        Object.defineProperty(process, 'platform', platform);
+        Object.assign(_internal.lockRetry, savedRetry);
+        if (restoreFs) {
+          restoreFs();
+          restoreFs = null;
+        }
+      });
+
+      const asWindows = () => Object.defineProperty(process, 'platform', { value: 'win32' });
+      const asLinux = () => Object.defineProperty(process, 'platform', { value: 'linux' });
+
+      it('should never need to read the archive back from disk', async function() {
+        asWindows();
+        // Even a file that stays locked for good does not matter
+        const calls = lockFor('readFileSync', '.zip', Infinity);
+        const target = path.join(tempDir, 'out');
+
+        await downloadAndExtract([`${baseUrl}/a.zip`], target, { stripRootFolder: true });
+
+        expect(calls.failed).to.equal(0);
+        expect(fs.readdirSync(target)).to.deep.equal(['index.php']);
+        expect(fs.readdirSync(tempDir)).to.deep.equal(['out']);
+      });
+
+      it('should wait for an extracted folder that cannot be moved yet', async function() {
+        asWindows();
+        const calls = lockFor('renameSync', 'product-1.0', 3, 'EBUSY');
+        const target = path.join(tempDir, 'out');
+
+        await downloadAndExtract([`${baseUrl}/a.zip`], target, { stripRootFolder: true });
+
+        expect(calls.failed).to.equal(3);
+        expect(fs.readdirSync(target)).to.deep.equal(['index.php']);
+        expect(fs.readdirSync(tempDir)).to.deep.equal(['out']);
+      });
+
+      it('should explain a lock that does not go away, and leave nothing behind', async function() {
+        asWindows();
+        const calls = lockFor('renameSync', 'product-1.0', Infinity);
+        const target = path.join(tempDir, 'out');
+
+        const error = await downloadAndExtract([`${baseUrl}/a.zip`], target, { stripRootFolder: true })
+          .then(() => null, failure => failure);
+
+        expect(calls.failed).to.equal(5);
+        expect(error.code).to.equal('EPERM');
+        expect(error.message).to.include(target).and.to.include('אנטי-וירוס');
+        expect(fs.readdirSync(tempDir)).to.deep.equal([]);
+      });
+
+      it('should not retry on other systems, where these errors mean a real permission problem', async function() {
+        asLinux();
+        const calls = lockFor('renameSync', 'product-1.0', Infinity);
+
+        const error = await downloadAndExtract([`${baseUrl}/a.zip`], path.join(tempDir, 'out'), { stripRootFolder: true })
+          .then(() => null, failure => failure);
+
+        expect(calls.failed).to.equal(1);
+        expect(error.code).to.equal('EPERM');
+      });
+
+      it('should not retry errors that are not locks', async function() {
+        asWindows();
+        const calls = lockFor('renameSync', 'product-1.0', Infinity, 'ENOSPC');
+
+        const error = await downloadAndExtract([`${baseUrl}/a.zip`], path.join(tempDir, 'out'), { stripRootFolder: true })
+          .then(() => null, failure => failure);
+
+        expect(calls.failed).to.equal(1);
+        expect(error.code).to.equal('ENOSPC');
+      });
     });
 
     it('should replace an existing target folder completely', async function() {

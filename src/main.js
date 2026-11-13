@@ -1,11 +1,11 @@
-const { app, BrowserWindow, Menu, ipcMain, shell, dialog } = require('electron');
+const { app, BrowserWindow, Menu, ipcMain, net, shell, dialog } = require('electron');
 const fs = require('fs');
 const path = require('path');
 const serverManager = require('./server-manager');
 const { APP_NAME, buildMenuTemplate } = require('./menu');
 const { WikiView } = require('./wiki-view');
 
-const { setDataPath, getPaths, getStatus, cleanupStaleProcesses, downloadServers, installMediaWiki, startServers, stopServers } = serverManager;
+const { setDataPath, setFetch, isDevMode, removeDevStandIns, getPaths, getStatus, cleanupStaleProcesses, downloadServers, installMediaWiki, startServers, stopServers } = serverManager;
 
 // Matches the page's background, so the window never flashes white
 const WINDOW_BACKGROUND = '#f4f6fa';
@@ -37,7 +37,14 @@ if (app.commandLine) {
 
 // Servers, MediaWiki and the database must live in a writable location.
 // The install directory (process.resourcesPath) is usually read-only.
-setDataPath(process.env.HAMICHLOL_DATA_DIR || path.join(app.getPath('userData'), 'data'));
+// Dev mode keeps its stand-in files in a folder of its own: in the real data
+// folder they would look like downloaded servers, and starting those fails.
+setDataPath(process.env.HAMICHLOL_DATA_DIR || path.join(app.getPath('userData'), isDevMode() ? 'data-dev' : 'data'));
+
+// Download through Chromium's network stack rather than Node's: it uses the
+// proxy and the certificates configured on the computer, which matters behind
+// content filters and corporate proxies.
+setFetch((url, options) => net.fetch(url, options));
 
 function createWindow() {
   mainWindow = new BrowserWindow({
@@ -71,7 +78,10 @@ function createWindow() {
 }
 
 function setupApp() {
-  app.whenReady().then(() => {
+  app.whenReady().then(async () => {
+    // Before the page asks for the status: stand-ins an earlier version's dev
+    // mode left in the real data folder would pass for downloaded servers
+    await removeDevStandIns().catch(error => console.error('Failed to remove dev mode leftovers:', error));
     // Stop servers left running by a previous run that crashed or was killed
     cleanupStaleProcesses().catch(error => console.error('Failed to clean up leftover servers:', error));
     createWindow();
@@ -131,10 +141,6 @@ function sendToPage(channel, message) {
   }
 }
 
-function sendStatus(message) {
-  sendToPage('status-update', message);
-}
-
 // Everything the page needs to draw itself
 function currentState() {
   return { ...getStatus(), busy: appState.busy, error: appState.error, wikiShown: wikiView.isShown() };
@@ -147,7 +153,6 @@ function syncState() {
 
   if (serversWereRunning && !status.running && !appState.busy) {
     appState.error = { action: 'crash', message: 'השרתים נעצרו באופן בלתי צפוי. אפשר להפעיל אותם שוב.' };
-    sendStatus('השרתים נעצרו');
   }
   serversWereRunning = status.running;
 
@@ -189,14 +194,19 @@ function changeZoom(change) {
 // ---------------------------------------------------------------------------
 // Operations. The page's buttons (through IPC) and the menu run the same code.
 // ---------------------------------------------------------------------------
+//
+// The page draws its status line from the state sent with 'state-changed'
+// (busy, error, running), whoever started the operation: its own buttons, the
+// menu, or a server that stopped by itself. No separate status texts are
+// pushed: such a text could arrive after the state it belongs to and leave a
+// stale status. Messages on one channel arrive in the order they were sent.
 
-async function runOperation(action, message, task, errorLabel) {
+async function runOperation(action, task, errorLabel) {
   if (appState.busy) {
     return { success: false, error: 'פעולה אחרת עדיין מתבצעת. יש להמתין לסיומה' };
   }
   appState.busy = action;
   appState.error = null;
-  sendStatus(message);
   syncState();
   try {
     const result = await task();
@@ -215,30 +225,25 @@ async function runOperation(action, message, task, errorLabel) {
 }
 
 const operations = {
-  download: () => runOperation('download', 'מכין שרתים...', async () => {
+  download: () => runOperation('download', async () => {
     await downloadServers();
   }, 'Failed to download servers'),
 
-  install: config => runOperation('install', 'מתקין MediaWiki...', async () => {
+  install: config => runOperation('install', async () => {
     await installMediaWiki(config);
   }, 'Failed to install MediaWiki'),
 
-  start: () => runOperation('start', 'מפעיל שרתים...', async () => {
-    const ports = await startServers();
-    sendStatus('השרתים פועלים');
-    return ports;
+  start: () => runOperation('start', async () => {
+    return startServers();
   }, 'Failed to start servers'),
 
-  stop: () => runOperation('stop', 'מכבה שרתים...', async () => {
+  stop: () => runOperation('stop', async () => {
     await stopServers();
-    sendStatus('השרתים כבויים');
   }, 'Failed to stop servers'),
 
-  restart: () => runOperation('restart', 'מפעיל מחדש את השרתים...', async () => {
+  restart: () => runOperation('restart', async () => {
     await stopServers();
-    const ports = await startServers();
-    sendStatus('השרתים פועלים');
-    return ports;
+    return startServers();
   }, 'Failed to restart servers')
 };
 
