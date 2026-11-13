@@ -1,5 +1,5 @@
-// The wiki, shown in a BrowserView that fills the main window below the slim
-// bar of the app page.
+// The wiki, shown in a WebContentsView that fills the main window below the
+// slim bar of the app page.
 //
 // The wiki is not shown in an <iframe> of the app page: MediaWiki forbids
 // framing its edit pages (X-Frame-Options), and the app page has Node access,
@@ -7,7 +7,7 @@
 // access and only ever shows this computer's wiki; any other address opens in
 // the system browser.
 
-const { BrowserView, shell } = require('electron');
+const { WebContentsView, shell } = require('electron');
 
 // Height of the bar the app page shows above the wiki (see #wikiBar in index.html)
 const WIKI_BAR_HEIGHT = 48;
@@ -104,7 +104,7 @@ class WikiView {
     }
     this.hide();
 
-    const view = new BrowserView({
+    const view = new WebContentsView({
       webPreferences: {
         nodeIntegration: false,
         contextIsolation: true,
@@ -129,10 +129,12 @@ class WikiView {
       }
       return { action: 'deny' };
     });
-    const keepInside = (event, url) => {
-      if (!isWikiUrl(url, port)) {
+    // The address is a property of the event (passing it as a second argument
+    // is deprecated)
+    const keepInside = event => {
+      if (!isWikiUrl(event.url, port)) {
         event.preventDefault();
-        openExternally(url);
+        openExternally(event.url);
       }
     };
     contents.on('will-navigate', keepInside);
@@ -152,7 +154,9 @@ class WikiView {
     }
 
     view.setBackgroundColor('#ffffff');
-    window.setBrowserView(view);
+    window.contentView.addChildView(view);
+    // A WebContentsView has no automatic resizing: it is placed again
+    // whenever the window's size changes
     this.layout();
     window.on('resize', this.layout);
     window.on('enter-full-screen', this.layout);
@@ -174,8 +178,9 @@ class WikiView {
       window.removeListener('resize', this.layout);
       window.removeListener('enter-full-screen', this.layout);
       window.removeListener('leave-full-screen', this.layout);
-      window.removeBrowserView(view);
+      window.contentView.removeChildView(view);
     }
+    // A removed view does not free its page by itself
     if (!view.webContents.isDestroyed()) {
       view.webContents.close();
     }
@@ -199,14 +204,14 @@ class WikiView {
   }
 
   goBack() {
-    if (this.view && this.view.webContents.canGoBack()) {
-      this.view.webContents.goBack();
+    if (this.view && this.view.webContents.navigationHistory.canGoBack()) {
+      this.view.webContents.navigationHistory.goBack();
     }
   }
 
   goForward() {
-    if (this.view && this.view.webContents.canGoForward()) {
-      this.view.webContents.goForward();
+    if (this.view && this.view.webContents.navigationHistory.canGoForward()) {
+      this.view.webContents.navigationHistory.goForward();
     }
   }
 
@@ -240,8 +245,8 @@ class WikiView {
     return {
       shown: true,
       title: contents.getTitle(),
-      canGoBack: contents.canGoBack(),
-      canGoForward: contents.canGoForward()
+      canGoBack: contents.navigationHistory.canGoBack(),
+      canGoForward: contents.navigationHistory.canGoForward()
     };
   }
 }

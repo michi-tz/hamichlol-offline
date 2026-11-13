@@ -7,8 +7,9 @@
 // the tests are about the window: which step is shown, what the form accepts,
 // how the wiki is shown, and that the state survives a restart of the app.
 //
-// The wiki is a BrowserView of the main process, not part of the app page, so
-// it is inspected through the main process (wikiView() below).
+// The wiki is a WebContentsView of the main process, a child of the window's
+// content view and not part of the app page, so it is inspected through the
+// main process (wikiView() below).
 
 const { describe, it, beforeEach, afterEach } = require('mocha');
 const { expect } = require('chai');
@@ -83,9 +84,14 @@ describe('Application window (dev mode)', function() {
   const wikiMode = () => page.evaluate(() => document.body.classList.contains('wiki-mode'));
 
   // The wiki view as the main process sees it, or null when there is none
-  const viewInfo = () => app.evaluate(async ({ BrowserWindow }) => {
+  const viewInfo = () => app.evaluate(async ({ BrowserWindow, WebContentsView }) => {
     const window = BrowserWindow.getAllWindows()[0];
-    const view = window.getBrowserView();
+    // The window's own page is not among the children of its content view
+    const views = window.contentView.children.filter(child => child instanceof WebContentsView);
+    if (views.length > 1) {
+      throw new Error(`${views.length} wiki views in the window`);
+    }
+    const [view] = views;
     if (!view) {
       return null;
     }
@@ -104,8 +110,9 @@ describe('Application window (dev mode)', function() {
 
   // Run `code` in the wiki page, as if the user did it (clicks count as user
   // actions, so the history of the page behaves as it does for real clicks)
-  const inWiki = code => app.evaluate(({ BrowserWindow }, source) =>
-    BrowserWindow.getAllWindows()[0].getBrowserView().webContents.executeJavaScript(source, true), code);
+  const inWiki = code => app.evaluate(({ BrowserWindow, WebContentsView }, source) =>
+    BrowserWindow.getAllWindows()[0].contentView.children.find(child => child instanceof WebContentsView)
+      .webContents.executeJavaScript(source, true), code);
 
   // Wait until the wiki is shown and its page has loaded
   async function wikiView(predicate = info => info.url.startsWith('http://127.0.0.1:')) {

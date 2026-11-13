@@ -63,10 +63,16 @@ class FakeWebContents extends EventEmitter {
 
   getURL() { return this.url; }
   getTitle() { return this.title; }
-  canGoBack() { return this.historyIndex > 0; }
-  canGoForward() { return this.historyIndex < this.history.length - 1; }
-  goBack() { this.historyIndex -= 1; this.url = this.history[this.historyIndex]; }
-  goForward() { this.historyIndex += 1; this.url = this.history[this.historyIndex]; }
+  // The history methods directly on webContents are deprecated, so the stand-in
+  // only has them here
+  get navigationHistory() {
+    return {
+      canGoBack: () => this.historyIndex > 0,
+      canGoForward: () => this.historyIndex < this.history.length - 1,
+      goBack: () => { this.historyIndex -= 1; this.url = this.history[this.historyIndex]; },
+      goForward: () => { this.historyIndex += 1; this.url = this.history[this.historyIndex]; }
+    };
+  }
   reload() { this.reloaded = (this.reloaded || 0) + 1; }
   focus() { this.focused += 1; }
   getZoomLevel() { return this.zoomLevel; }
@@ -90,7 +96,21 @@ function createFakeElectron(tempDir, { gotLock = true } = {}) {
       this.shown = false;
       this.title = options.title;
       this.contentSize = [options.width, options.height - 25];
-      this.browserView = null;
+      // The window's root view, which holds the views shown over the page
+      const children = [];
+      this.contentView = {
+        children,
+        addChildView: view => {
+          if (!children.includes(view)) {
+            children.push(view);
+          }
+        },
+        removeChildView: view => {
+          if (children.includes(view)) {
+            children.splice(children.indexOf(view), 1);
+          }
+        }
+      };
       this.webContents = new FakeWebContents(this);
       windows.push(this);
     }
@@ -139,18 +159,10 @@ function createFakeElectron(tempDir, { gotLock = true } = {}) {
       return this.contentSize;
     }
 
-    setBrowserView(view) {
-      this.browserView = view;
-    }
-
-    getBrowserView() {
-      return this.browserView;
-    }
-
-    removeBrowserView(view) {
-      if (this.browserView === view) {
-        this.browserView = null;
-      }
+    // The view shown over the page, if any (for the tests; not Electron's API)
+    shownView() {
+      expect(this.contentView.children.length).to.be.at.most(1);
+      return this.contentView.children[0] || null;
     }
 
     // What Electron does when the user closes the window
@@ -164,7 +176,7 @@ function createFakeElectron(tempDir, { gotLock = true } = {}) {
     }
   }
 
-  class BrowserView {
+  class WebContentsView {
     constructor(options) {
       this.options = options;
       this.bounds = null;
@@ -253,7 +265,7 @@ function createFakeElectron(tempDir, { gotLock = true } = {}) {
   };
 
   return {
-    electron: { app, BrowserWindow, BrowserView, Menu, ipcMain, net, shell, dialog },
+    electron: { app, BrowserWindow, WebContentsView, Menu, ipcMain, net, shell, dialog },
     app,
     windows,
     views,
@@ -606,7 +618,7 @@ describe('Electron main process', function() {
       await invoke('download-servers');
       await invoke('install-mediawiki', VALID_CONFIG);
       await invoke('start-servers');
-      const view = window.getBrowserView();
+      const view = window.shownView();
       await item('zoomOut').click();
       expect(view.webContents.zoomLevel).to.be.below(0);
       expect(window.webContents.zoomLevel).to.equal(0);
@@ -627,7 +639,7 @@ describe('Electron main process', function() {
       ({ phpPort } = await invoke('start-servers'));
     });
 
-    const view = () => window.getBrowserView();
+    const view = () => window.shownView();
 
     it('should fill the window below the bar in its own locked-down view', function() {
       expect(view()).to.exist;
@@ -646,9 +658,10 @@ describe('Electron main process', function() {
 
     it('should open addresses outside the wiki in the system browser', function() {
       const contents = view().webContents;
-      const navigate = url => {
+      const navigate = (url, event = 'will-navigate') => {
         let prevented = false;
-        contents.emit('will-navigate', { preventDefault: () => { prevented = true; } }, url);
+        // The address comes with the event, as in current Electron
+        contents.emit(event, { url, preventDefault: () => { prevented = true; } });
         return prevented;
       };
 
@@ -658,6 +671,9 @@ describe('Electron main process', function() {
       expect(navigate(`http://127.0.0.1:${phpPort + 1}/`)).to.be.true;
       expect(navigate('file:///etc/passwd')).to.be.true;
       expect(navigate('javascript:alert(1)')).to.be.true;
+      // Redirects are held to the same rule
+      expect(navigate(`http://127.0.0.1:${phpPort}/index.php?title=Moved`, 'will-redirect')).to.be.false;
+      expect(navigate('file:///etc/hosts', 'will-redirect')).to.be.true;
 
       // Only web addresses are handed to the system
       expect(fake.shell.opened).to.deep.equal(['https://www.hamichlol.org.il/', `http://127.0.0.1:${phpPort + 1}/`]);
@@ -743,13 +759,17 @@ describe('Electron main process', function() {
     });
 
     it('should show the wiki again in a window that is opened again', async function() {
+      const first = view();
       window.close();
+      // The closed window's page is freed
+      expect(first.webContents.closed).to.be.true;
       fake.app.emit('activate');
       const [, second] = fake.windows;
 
       second.webContents.emit('did-finish-load');
-      expect(second.getBrowserView()).to.exist;
-      expect(second.getBrowserView().webContents.getURL()).to.equal(`http://127.0.0.1:${phpPort}/`);
+      expect(second.shownView()).to.exist;
+      expect(second.shownView()).to.not.equal(first);
+      expect(second.shownView().webContents.getURL()).to.equal(`http://127.0.0.1:${phpPort}/`);
     });
   });
 
