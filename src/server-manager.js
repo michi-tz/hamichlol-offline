@@ -3,7 +3,6 @@ const os = require('os');
 const net = require('net');
 const path = require('path');
 const { execFile, spawn } = require('child_process');
-const download = require('download');
 const AdmZip = require('adm-zip');
 const portfinder = require('portfinder');
 const mysql = require('mysql2/promise');
@@ -70,6 +69,15 @@ let mysqlPort = null;
 
 function setDataPath(dir) {
   dataPath = dir;
+}
+
+// How files are downloaded. Node's own fetch by default; the Electron main
+// process replaces it with Chromium's network stack, which honours the
+// computer's proxy settings and certificate store.
+let fetchImpl = (url, options) => fetch(url, options);
+
+function setFetch(implementation) {
+  fetchImpl = implementation;
 }
 
 function getPaths() {
@@ -273,10 +281,22 @@ function logOutput(child, label) {
 // Spawn a server process and resolve once it accepts TCP connections on `port`.
 // Rejects (and kills the process) if it fails to start, exits early or times out.
 //
+function startError(label, file, error) {
+  const wrapped = new Error(`${label} could not be started (${file}): ${error.code || error.message}`);
+  wrapped.code = error.code;
+  return wrapped;
+}
+
 // `key` ('mysql' or 'php') tracks the process while it is still starting, so
 // that stopping the servers or a crash at that moment does not leave it behind.
 async function spawnServer(label, key, file, args, port, options = {}) {
-  const child = spawn(file, args, { windowsHide: true, ...options });
+  let child;
+  try {
+    child = spawn(file, args, { windowsHide: true, ...options });
+  } catch (error) {
+    // Windows reports a file that is not a program as just "spawn UNKNOWN"
+    throw startError(label, file, error);
+  }
   startingServers.set(key, { child, port });
   writeRunState();
   try {
@@ -289,7 +309,7 @@ async function spawnServer(label, key, file, args, port, options = {}) {
 async function waitUntilListening(label, child, port) {
   let failure = null;
   child.once('error', error => {
-    failure = failure || error;
+    failure = failure || startError(label, child.spawnfile, error);
   });
   child.once('exit', code => {
     failure = failure || new Error(`${label} exited with code ${code}`);
@@ -699,13 +719,24 @@ function getStatus() {
 // Downloads
 // ---------------------------------------------------------------------------
 
-async function downloadFirstAvailable(urls, zipPath) {
+// Save `url` to `filePath`, following redirects.
+// Download `url` into memory. The archive is never written to disk: on
+// Windows, a scanner can keep a freshly written archive with thousands of
+// entries (MediaWiki) locked for minutes, without reporting anything.
+async function downloadFile(url) {
+  const response = await fetchImpl(url, { redirect: 'follow' });
+  if (!response.ok || !response.body) {
+    throw new Error(`HTTP ${response.status} ${response.statusText}`.trim());
+  }
+  return Buffer.from(await response.arrayBuffer());
+}
+
+async function downloadFirstAvailable(urls) {
   let lastError = null;
   for (const url of urls) {
     try {
       console.log(`Downloading ${url}`);
-      await download(url, path.dirname(zipPath), { filename: path.basename(zipPath) });
-      return;
+      return await downloadFile(url);
     } catch (error) {
       console.error(`Download failed from ${url}: ${error.message}`);
       lastError = error;
@@ -717,16 +748,58 @@ async function downloadFirstAvailable(urls, zipPath) {
 // Download a zip and extract it into `targetDir`. Work happens in temporary
 // paths and the result is renamed into place only when complete, so an
 // interrupted download is never mistaken for a finished one.
+// On Windows a scanner (antivirus, internet filter) that checks files which
+// were just written keeps them locked for a while; moving or deleting them, or
+// a folder holding them, then fails with EPERM, EBUSY or EACCES. Such
+// operations are retried, for up to a minute.
+const LOCK_ERROR_CODES = new Set(['EPERM', 'EBUSY', 'EACCES']);
+const lockRetry = { attempts: 120, delayMs: 500 };
+
+async function retryWhileLocked(file, action) {
+  for (let attempt = 1; ; attempt++) {
+    try {
+      return action();
+    } catch (error) {
+      if (process.platform !== 'win32' || !LOCK_ERROR_CODES.has(error.code)) {
+        throw error;
+      }
+      if (attempt >= lockRetry.attempts) {
+        const locked = new Error(
+          `אין גישה לקובץ ${file} (${error.code}). ייתכן שתוכנה אחרת, למשל אנטי-וירוס ` +
+          'או מסנן אינטרנט, סורקת אותו. כדאי לנסות שוב בעוד כמה דקות'
+        );
+        locked.code = error.code;
+        throw locked;
+      }
+      await delay(lockRetry.delayMs);
+    }
+  }
+}
+
+function removePath(target) {
+  return retryWhileLocked(target, () => fs.rmSync(target, { recursive: true, force: true }));
+}
+
+// Clean-up that must not hide the error that made it necessary; whatever is
+// left is removed at the start of the next attempt.
+async function removeQuietly(target) {
+  try {
+    await removePath(target);
+  } catch (error) {
+    console.error(`Could not remove ${target}: ${error.message}`);
+  }
+}
+
 async function downloadAndExtract(urls, targetDir, { stripRootFolder = false, prepare } = {}) {
-  const zipPath = `${targetDir}.zip`;
   const partialDir = `${targetDir}.partial`;
-  fs.rmSync(zipPath, { force: true });
-  fs.rmSync(partialDir, { recursive: true, force: true });
+  // Left behind by earlier versions, which saved the archive before extracting it
+  await removeQuietly(`${targetDir}.zip`);
+  await removePath(partialDir);
   fs.mkdirSync(partialDir, { recursive: true });
 
   try {
-    await downloadFirstAvailable(urls, zipPath);
-    new AdmZip(zipPath).extractAllTo(partialDir, true);
+    const zipData = await downloadFirstAvailable(urls);
+    new AdmZip(zipData).extractAllTo(partialDir, true);
 
     let root = partialDir;
     if (stripRootFolder) {
@@ -740,18 +813,17 @@ async function downloadAndExtract(urls, targetDir, { stripRootFolder = false, pr
       prepare(root, targetDir);
     }
 
-    fs.rmSync(targetDir, { recursive: true, force: true });
-    fs.renameSync(root, targetDir);
+    await removePath(targetDir);
+    await retryWhileLocked(targetDir, () => fs.renameSync(root, targetDir));
   } finally {
-    fs.rmSync(zipPath, { force: true });
-    fs.rmSync(partialDir, { recursive: true, force: true });
+    await removeQuietly(partialDir);
   }
 }
 
 async function initializeDatabase() {
   const { dbDataDir } = getPaths();
   const partialDir = `${dbDataDir}.partial`;
-  fs.rmSync(partialDir, { recursive: true, force: true });
+  await removePath(partialDir);
 
   const database = requireDatabase();
   const asRoot = runsAsRoot() ? ['--user=root'] : [];
@@ -771,8 +843,8 @@ async function initializeDatabase() {
       ...asRoot
     ]);
   }
-  fs.rmSync(dbDataDir, { recursive: true, force: true });
-  fs.renameSync(partialDir, dbDataDir);
+  await removePath(dbDataDir);
+  await retryWhileLocked(dbDataDir, () => fs.renameSync(partialDir, dbDataDir));
   console.log('MySQL data directory initialized');
 }
 
@@ -788,7 +860,7 @@ function assertCanDownload(name, problem) {
 
 // Copy a MediaWiki installation found on the computer into the data folder, so
 // the existing installation (and its wiki, if any) is never modified.
-function copyMediaWiki(sourceDir, targetDir) {
+async function copyMediaWiki(sourceDir, targetDir) {
   const partialDir = `${targetDir}.partial`;
   // Per-wiki state of the existing installation; a fresh wiki starts without it
   const skipped = ['LocalSettings.php', 'images', 'cache'];
@@ -796,7 +868,7 @@ function copyMediaWiki(sourceDir, targetDir) {
   // different spelling from the one it was given
   const root = path.toNamespacedPath(path.resolve(sourceDir));
   const isSkipped = source => skipped.includes(path.relative(root, path.toNamespacedPath(path.resolve(source))));
-  fs.rmSync(partialDir, { recursive: true, force: true });
+  await removePath(partialDir);
 
   try {
     fs.cpSync(sourceDir, partialDir, {
@@ -807,19 +879,30 @@ function copyMediaWiki(sourceDir, targetDir) {
     });
     fs.mkdirSync(path.join(partialDir, 'images'), { recursive: true });
     fs.mkdirSync(path.join(partialDir, 'cache'), { recursive: true });
-    fs.rmSync(targetDir, { recursive: true, force: true });
-    fs.renameSync(partialDir, targetDir);
+    await removePath(targetDir);
+    await retryWhileLocked(targetDir, () => fs.renameSync(partialDir, targetDir));
   } finally {
-    fs.rmSync(partialDir, { recursive: true, force: true });
+    await removeQuietly(partialDir);
   }
 }
 
+// Contents of the stand-in files dev mode writes instead of real downloads.
+// removeDevStandIns() recognises them by the same values.
+const DEV_STAND_INS = {
+  php: 'MOCK PHP EXE',
+  mariadb: 'MOCK MARIADB EXE',
+  mediaWiki: '<?php echo "Mock MediaWiki"; ?>',
+  installer: '<?php echo "Mock Installer"; ?>',
+  // Start of the stand-in LocalSettings.php; the rest holds the chosen names
+  localSettings: '<?php\n// Mock LocalSettings.php for development\n'
+};
+
 function createMockServers() {
-  const { phpDir, phpIni, mariadbDir, dbDataDir, mediaWikiPath } = getPaths();
+  const { phpDir, phpExe, phpIni, mariadbDir, dbDataDir, mediaWikiPath } = getPaths();
 
   if (!fs.existsSync(phpIni)) {
     fs.mkdirSync(phpDir, { recursive: true });
-    fs.writeFileSync(path.join(phpDir, 'php.exe'), 'MOCK PHP EXE');
+    fs.writeFileSync(phpExe, DEV_STAND_INS.php);
     fs.writeFileSync(phpIni, PHP_EXTENSIONS.map(extension => `extension=${extension}`).join('\n'));
   }
 
@@ -827,7 +910,7 @@ function createMockServers() {
   if (!fs.existsSync(binDir)) {
     fs.mkdirSync(binDir, { recursive: true });
     for (const kind of Object.keys(MARIADB_BINARIES)) {
-      fs.writeFileSync(path.join(binDir, MARIADB_BINARIES[kind][0]), 'MOCK MARIADB EXE');
+      fs.writeFileSync(path.join(binDir, MARIADB_BINARIES[kind][0]), DEV_STAND_INS.mariadb);
     }
   }
 
@@ -835,8 +918,74 @@ function createMockServers() {
 
   if (!fs.existsSync(path.join(mediaWikiPath, 'index.php'))) {
     fs.mkdirSync(path.join(mediaWikiPath, 'maintenance'), { recursive: true });
-    fs.writeFileSync(path.join(mediaWikiPath, 'index.php'), '<?php echo "Mock MediaWiki"; ?>');
-    fs.writeFileSync(path.join(mediaWikiPath, 'maintenance', 'install.php'), '<?php echo "Mock Installer"; ?>');
+    fs.writeFileSync(path.join(mediaWikiPath, 'index.php'), DEV_STAND_INS.mediaWiki);
+    fs.writeFileSync(path.join(mediaWikiPath, 'maintenance', 'install.php'), DEV_STAND_INS.installer);
+  }
+}
+
+// Whether `file` starts with `marker`, or with `exact` holds nothing else.
+// Reads only that many bytes: a real server program is a large file.
+function fileStartsWith(file, marker, { exact = false } = {}) {
+  const expected = Buffer.from(marker);
+  let fd = null;
+  try {
+    fd = fs.openSync(file, 'r');
+    if (exact && fs.fstatSync(fd).size !== expected.length) {
+      return false;
+    }
+    const actual = Buffer.alloc(expected.length);
+    return fs.readSync(fd, actual, 0, expected.length, 0) === expected.length && actual.equals(expected);
+  } catch (error) {
+    // Missing, a folder or unreadable: not a stand-in
+    return false;
+  } finally {
+    if (fd !== null) {
+      fs.closeSync(fd);
+    }
+  }
+}
+
+// The empty folder dev mode creates in place of an initialized database. A
+// real database is never empty: it is created elsewhere and moved into place.
+function isDevStandInDatabase(dbDataDir) {
+  try {
+    const entries = fs.readdirSync(dbDataDir);
+    return entries.length === 1 && entries[0] === 'mysql' && fs.readdirSync(path.join(dbDataDir, 'mysql')).length === 0;
+  } catch (error) {
+    return false;
+  }
+}
+
+// Earlier versions ran dev mode in the real data folder. Its stand-ins there
+// look like downloaded servers and an installed wiki, so starting fails and the
+// real programs are never downloaded. Remove them, and only them; run once
+// before the data folder is used. Never in dev mode, which needs them.
+async function removeDevStandIns() {
+  if (isDevMode()) {
+    return;
+  }
+  const { phpDir, phpExe, mariadbDir, dbDataDir, mediaWikiPath, localSettings } = getPaths();
+  const remove = async (target, what) => {
+    await removePath(target);
+    console.log(`Removed dev mode's stand-in ${what}: ${target}`);
+  };
+
+  if (fileStartsWith(phpExe, DEV_STAND_INS.php, { exact: true })) {
+    await remove(phpDir, 'PHP');
+  }
+  if (fileStartsWith(path.join(mariadbDir, 'bin', MARIADB_BINARIES.server[0]), DEV_STAND_INS.mariadb, { exact: true })) {
+    await remove(mariadbDir, 'MariaDB');
+  }
+  if (isDevStandInDatabase(dbDataDir)) {
+    await remove(dbDataDir, 'database');
+  }
+  if (fileStartsWith(localSettings, DEV_STAND_INS.localSettings)) {
+    await remove(localSettings, 'LocalSettings.php');
+  }
+  // A real LocalSettings.php next to it is kept, and so is its folder
+  if (fileStartsWith(path.join(mediaWikiPath, 'index.php'), DEV_STAND_INS.mediaWiki, { exact: true }) &&
+      !fs.existsSync(localSettings)) {
+    await remove(mediaWikiPath, 'MediaWiki');
   }
 }
 
@@ -887,7 +1036,7 @@ async function downloadServers() {
     const mediawiki = resolveMediaWiki();
     if (mediawiki.source === 'system') {
       console.log(`Copying installed MediaWiki ${mediawiki.version} from ${mediawiki.dir}`);
-      copyMediaWiki(mediawiki.dir, mediaWikiPath);
+      await copyMediaWiki(mediawiki.dir, mediaWikiPath);
     } else {
       console.log(`Downloading MediaWiki ${DOWNLOADS.mediawiki.version}...`);
       await downloadAndExtract(DOWNLOADS.mediawiki.urls, mediaWikiPath, { stripRootFolder: true });
@@ -1023,7 +1172,7 @@ async function installMediaWiki(rawConfig) {
 
     fs.writeFileSync(
       localSettings,
-      `<?php\n// Mock LocalSettings.php for development\n$wgSitename = ${phpString(wikiName)};\n$wgDBname = ${phpString(dbName)};\n`
+      `${DEV_STAND_INS.localSettings}$wgSitename = ${phpString(wikiName)};\n$wgDBname = ${phpString(dbName)};\n`
     );
 
     return true;
@@ -1189,11 +1338,13 @@ async function stopServers() {
 
 module.exports = {
   setDataPath,
+  setFetch,
   dbServerArgs,
   getPaths,
   getStatus,
   cleanupStaleProcesses,
   isDevMode,
+  removeDevStandIns,
   validateConfig,
   buildDatabaseSetupQueries,
   patchLocalSettings,
@@ -1206,6 +1357,7 @@ module.exports = {
     configurePhpIni,
     downloadAndExtract,
     copyMediaWiki,
+    lockRetry,
     identifyProcess,
     mysqlAdminShutdown,
     createDatabase

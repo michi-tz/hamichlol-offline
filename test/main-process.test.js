@@ -88,7 +88,16 @@ function createFakeElectron(tempDir, { gotLock = true } = {}) {
     }
   };
 
-  return { electron: { app, BrowserWindow, ipcMain }, app, windows, handlers };
+  // Chromium's network stack, which the app downloads through
+  const netRequests = [];
+  const net = {
+    fetch: async (url, options) => {
+      netRequests.push([url, options]);
+      return new Response('from electron net');
+    }
+  };
+
+  return { electron: { app, BrowserWindow, ipcMain, net }, app, windows, handlers, netRequests };
 }
 
 describe('Electron main process', function() {
@@ -120,7 +129,6 @@ describe('Electron main process', function() {
   }
 
   const invoke = (channel, ...args) => fake.handlers[channel]({}, ...args);
-  const statusMessages = window => window.sent.filter(([channel]) => channel === 'status-update').map(([, message]) => message);
 
   before(function() {
     originalLoad = Module._load;
@@ -159,9 +167,29 @@ describe('Electron main process', function() {
     });
 
     it('should keep its data in the user data folder, not next to the program', async function() {
+      process.env.DEV_MODE = 'false';
       await loadMain();
 
       expect(serverManager.getPaths().dataPath).to.equal(path.join(tempDir, 'userData', 'data'));
+    });
+
+    it('should remove stand-ins an earlier version\'s dev mode left in the real data', async function() {
+      process.env.DEV_MODE = 'false';
+      const { DOWNLOADS } = require('../src/versions');
+      const phpDir = path.join(tempDir, 'userData', 'data', 'server', `php-${DOWNLOADS.php.version}`);
+      fs.mkdirSync(phpDir, { recursive: true });
+      fs.writeFileSync(path.join(phpDir, 'php.exe'), 'MOCK PHP EXE');
+
+      await loadMain();
+
+      expect(fs.existsSync(phpDir)).to.be.false;
+    });
+
+    it('should keep dev mode\'s stand-in files apart from the real data', async function() {
+      // In the real data folder they would be taken for downloaded servers
+      await loadMain();
+
+      expect(serverManager.getPaths().dataPath).to.equal(path.join(tempDir, 'userData', 'data-dev'));
     });
 
     it('should use HAMICHLOL_DATA_DIR when it is set', async function() {
@@ -169,6 +197,29 @@ describe('Electron main process', function() {
       await loadMain();
 
       expect(serverManager.getPaths().dataPath).to.equal(path.join(tempDir, 'custom'));
+    });
+
+    it('should download through Electron\'s network stack', async function() {
+      await loadMain();
+      const target = path.join(tempDir, 'file.bin');
+      fs.mkdirSync(tempDir, { recursive: true });
+
+      // Any failure here would come after the request was made; only the
+      // route the request takes matters
+      await serverManager._internal.downloadAndExtract(['https://example.invalid/a.zip'], target).catch(() => {});
+
+      expect(fake.netRequests).to.deep.equal([['https://example.invalid/a.zip', { redirect: 'follow' }]]);
+    });
+
+    it('should not push messages the page does not listen to', async function() {
+      await loadMain();
+      const page = fs.readFileSync(path.join(__dirname, '..', 'src', 'renderer', 'index.html'), 'utf8');
+
+      await invoke('download-servers');
+      await invoke('stop-servers');
+
+      expect(fake.windows[0].sent).to.deep.equal([]);
+      expect(page).to.not.include('ipcRenderer.on(');
     });
 
     it('should register every channel the page uses', async function() {
@@ -223,19 +274,6 @@ describe('Electron main process', function() {
       expect((await invoke('get-status')).running).to.be.false;
     });
 
-    it('should tell the page what it is doing', async function() {
-      await invoke('download-servers');
-      await invoke('install-mediawiki', VALID_CONFIG);
-      await invoke('start-servers');
-      await invoke('stop-servers');
-
-      const messages = statusMessages(fake.windows[0]);
-      expect(messages).to.have.lengthOf(6);
-      expect(messages[2]).to.include('מפעיל');
-      expect(messages[3]).to.include('פועלים');
-      expect(messages[5]).to.include('כבויים');
-    });
-
     it('should return errors as data instead of throwing', async function() {
       const tooEarly = await invoke('start-servers');
       expect(tooEarly.success).to.be.false;
@@ -248,13 +286,6 @@ describe('Electron main process', function() {
 
       const missing = await invoke('install-mediawiki', undefined);
       expect(missing.success).to.be.false;
-    });
-
-    it('should not report "running" after a failed start', async function() {
-      await invoke('start-servers');
-
-      const messages = statusMessages(fake.windows[0]);
-      expect(messages.some(message => message.includes('פועלים'))).to.be.false;
     });
 
     it('should keep working when the window was closed during an operation', async function() {
