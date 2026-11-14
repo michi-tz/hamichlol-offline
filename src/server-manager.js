@@ -214,6 +214,25 @@ function phpArgs(php, args) {
   return php.ini ? ['-c', php.ini, ...args] : args;
 }
 
+// Without a bytecode cache PHP recompiles all of MediaWiki on every request,
+// which takes many seconds per page on Windows. Given on the command line so
+// that folders installed by earlier versions get it too. Only for the bundled
+// PHP: an installed one keeps its own configuration.
+const PHP_SERVER_TUNING = [
+  'zend_extension=opcache',
+  'opcache.enable=1',
+  'opcache.memory_consumption=192',
+  'opcache.interned_strings_buffer=16',
+  'opcache.max_accelerated_files=20000',
+  'realpath_cache_size=4096K',
+  'realpath_cache_ttl=600'
+];
+
+function phpServerArgs(php, args) {
+  const tuning = true ? PHP_SERVER_TUNING.flatMap(setting => ['-d', setting]) : [];
+  return phpArgs(php, [...tuning, ...args]);
+}
+
 // A database server refuses to run as root unless told which user to run as.
 function runsAsRoot() {
   return typeof process.getuid === 'function' && process.getuid() === 0;
@@ -284,8 +303,10 @@ function canConnect(port) {
 }
 
 function logOutput(child, label) {
-  child.stdout.on('data', data => console.log(`${label}: ${data.toString()}`));
-  child.stderr.on('data', data => console.error(`${label} error: ${data.toString()}`));
+  // Both servers write their ordinary log to stderr, so it is not labelled an error
+  const log = data => console.log(`${label}: ${data.toString().trimEnd()}`);
+  child.stdout.on('data', log);
+  child.stderr.on('data', log);
 }
 
 // Spawn a server process and resolve once it accepts TCP connections on `port`.
@@ -1172,7 +1193,7 @@ async function startPhp() {
     'PHP',
     'php',
     php.exe,
-    phpArgs(php, ['-S', `${LOOPBACK_HOST}:${port}`, '-t', mediaWikiPath]),
+    phpServerArgs(php, ['-S', `${LOOPBACK_HOST}:${port}`, '-t', mediaWikiPath]),
     port,
     { cwd: php.cwd, env: { ...process.env, [DB_PORT_ENV]: String(mysqlPort) } }
   );
