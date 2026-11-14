@@ -1,5 +1,6 @@
 const fs = require('fs');
 const os = require('os');
+const { EventEmitter } = require('events');
 const net = require('net');
 const path = require('path');
 const { execFile, spawn } = require('child_process');
@@ -8,6 +9,7 @@ const portfinder = require('portfinder');
 const mysql = require('mysql2/promise');
 const { DOWNLOADS } = require('./versions');
 const systemTools = require('./system-tools');
+const adminValidation = require('./admin-validation');
 
 // Network settings. Everything binds to the loopback interface only.
 const LOOPBACK_HOST = '127.0.0.1';
@@ -30,7 +32,9 @@ const RESERVED_DB_NAMES = ['mysql', 'information_schema', 'performance_schema', 
 const IDENTIFIER_RE = /^[A-Za-z0-9_]{1,64}$/;
 // MySQL allows at most 32 characters in a user name (MariaDB allows more)
 const DB_USER_RE = /^[A-Za-z0-9_]{1,32}$/;
-const MIN_ADMIN_PASSWORD_LENGTH = 10;
+
+// Content and interface language of newly installed wikis
+const WIKI_LANGUAGE = 'he';
 
 const PHP_EXTENSIONS = ['mysqli', 'intl', 'mbstring', 'fileinfo', 'openssl', 'gd'];
 
@@ -66,6 +70,10 @@ const startingServers = new Map();
 // Server ports (valid while the matching process is running)
 let phpPort = null;
 let mysqlPort = null;
+
+// Emits 'change' when a server process exits, so the UI can follow servers that
+// stop without being asked to (crash, killed from outside)
+const events = new EventEmitter();
 
 function setDataPath(dir) {
   dataPath = dir;
@@ -250,6 +258,8 @@ function run(file, args, options = {}) {
         if (stderr) {
           error.message += `\n${stderr}`;
         }
+        error.stdout = stdout;
+        error.stderr = stderr;
         reject(error);
         return;
       }
@@ -548,7 +558,9 @@ async function cleanupStaleProcesses() {
 // ---------------------------------------------------------------------------
 
 // Validate and normalise the installation settings coming from the UI.
-function validateConfig(config) {
+// `commonPasswords` (a Set) enables the check against MediaWiki's list of
+// common passwords; without it that one check is skipped.
+function validateConfig(config, { commonPasswords = null } = {}) {
   const fields = ['dbName', 'dbUser', 'dbPassword', 'wikiName', 'adminUser', 'adminPassword'];
   const result = {};
   for (const field of fields) {
@@ -576,12 +588,35 @@ function validateConfig(config) {
   if (!result.wikiName || !result.adminUser) {
     throw new Error('יש למלא שם אתר ושם משתמש מנהל');
   }
-  // MediaWiki rejects shorter passwords for administrators.
-  if (result.adminPassword.length < MIN_ADMIN_PASSWORD_LENGTH) {
-    throw new Error(`סיסמת המנהל חייבת להכיל לפחות ${MIN_ADMIN_PASSWORD_LENGTH} תווים`);
+  // MediaWiki's installer refuses these too, but only after the database exists
+  const usernameError = adminValidation.validateAdminUsername(result.adminUser);
+  if (usernameError) {
+    throw new Error(usernameError);
+  }
+  const passwordError = adminValidation.validateAdminPassword(result.adminPassword, result.adminUser, { commonPasswords });
+  if (passwordError) {
+    throw new Error(passwordError);
   }
 
   return result;
+}
+
+// Live check of the administrator's name and password for the settings form.
+// Uses the common password list of the MediaWiki files already in the data
+// folder, when there are any. Never logs the password.
+function checkAdminCredentials({ adminUser, adminPassword } = {}) {
+  const commonPasswords = adminValidation.loadCommonPasswords(getPaths().mediaWikiPath);
+  const user = typeof adminUser === 'string' ? adminUser : '';
+  const password = typeof adminPassword === 'string' ? adminPassword : '';
+  const usernameError = adminValidation.validateAdminUsername(user);
+  const canonical = adminValidation.canonicalUsername(user);
+  return {
+    usernameError,
+    canonicalUsername: usernameError ? null : canonical,
+    passwordRules: adminValidation.checkAdminPassword(password, user, { commonPasswords })
+      .map(({ id, label, ok, skipped }) => ({ id, label, ok, skipped: Boolean(skipped) })),
+    passwordError: adminValidation.validateAdminPassword(password, user, { commonPasswords })
+  };
 }
 
 // SQL that (re)creates the wiki database and user. Values are escaped by mysql2.
@@ -920,6 +955,18 @@ function createMockServers() {
     fs.mkdirSync(path.join(mediaWikiPath, 'maintenance'), { recursive: true });
     fs.writeFileSync(path.join(mediaWikiPath, 'index.php'), DEV_STAND_INS.mediaWiki);
     fs.writeFileSync(path.join(mediaWikiPath, 'maintenance', 'install.php'), DEV_STAND_INS.installer);
+    // A short extract of the wikimedia/common-passwords list, in its format
+    const commonPasswords = path.join(mediaWikiPath, adminValidation.COMMON_PASSWORDS_FILE);
+    fs.mkdirSync(path.dirname(commonPasswords), { recursive: true });
+    fs.writeFileSync(commonPasswords, [
+      '<?php return [',
+      ...['123456', 'password', '12345678', 'qwerty', '123456789', 'qwertyuiop', '1234567890',
+        '1q2w3e4r5t', 'q1w2e3r4t5', 'password123', 'iloveyou12', 'pic\\\'s']
+        .map(entry => `'${entry}' => 1,`),
+      '',
+      '];',
+      ''
+    ].join('\n'));
   }
 }
 
@@ -1105,6 +1152,7 @@ async function startMysql() {
       writeRunState();
       stopSurvivor('MySQL', phpProcess);
     }
+    events.emit('change');
   });
   return port;
 }
@@ -1139,8 +1187,28 @@ async function startPhp() {
       writeRunState();
       stopSurvivor('PHP', mysqlProcess);
     }
+    events.emit('change');
   });
   return port;
+}
+
+// Run install.php. Its own messages are kept, but the command line is not: it
+// holds the passwords, and Node puts it into the error message of a failed run.
+async function runInstaller(file, args, options) {
+  try {
+    return await run(file, args, options);
+  } catch (error) {
+    const output = `${error.stderr || ''}\n${error.stdout || ''}`;
+    const details = output
+      .split(/\r?\n/)
+      .map(line => line.trim())
+      .filter(Boolean)
+      .filter(line => !args.some(arg => /^--(?:pass|dbpass|installdbpass)=/.test(arg) && line.includes(arg.slice(arg.indexOf('=') + 1))))
+      .slice(-5)
+      .join('\n');
+    const reason = error.code === 'ENOENT' ? 'PHP לא נמצא' : details || `קוד יציאה ${error.code}`;
+    throw new Error(`תוכנית ההתקנה של MediaWiki נכשלה. אפשר לתקן את ההגדרות ולנסות שוב.\n${reason}`);
+  }
 }
 
 async function createDatabase(config) {
@@ -1156,9 +1224,10 @@ async function createDatabase(config) {
 
 // Install MediaWiki
 async function installMediaWiki(rawConfig) {
-  const config = validateConfig(rawConfig);
-  const { dbName, dbUser, dbPassword, wikiName, adminUser, adminPassword } = config;
   const { mediaWikiPath, localSettings } = getPaths();
+  // Everything install.php would refuse is checked before the database is created
+  const config = validateConfig(rawConfig, { commonPasswords: adminValidation.loadCommonPasswords(mediaWikiPath) });
+  const { dbName, dbUser, dbPassword, wikiName, adminUser, adminPassword } = config;
 
   if (fs.existsSync(localSettings)) {
     throw new Error('MediaWiki כבר מותקן (הקובץ LocalSettings.php קיים)');
@@ -1172,7 +1241,8 @@ async function installMediaWiki(rawConfig) {
 
     fs.writeFileSync(
       localSettings,
-      `${DEV_STAND_INS.localSettings}$wgSitename = ${phpString(wikiName)};\n$wgDBname = ${phpString(dbName)};\n`
+      `${DEV_STAND_INS.localSettings}$wgSitename = ${phpString(wikiName)};\n$wgDBname = ${phpString(dbName)};\n` +
+      `$wgLanguageCode = ${phpString(WIKI_LANGUAGE)};\n`
     );
 
     return true;
@@ -1186,7 +1256,7 @@ async function installMediaWiki(rawConfig) {
     await createDatabase(config);
 
     const php = requirePhp();
-    await run(
+    await runInstaller(
       php.exe,
       phpArgs(php, [
         path.join(mediaWikiPath, 'maintenance', 'install.php'),
@@ -1200,6 +1270,8 @@ async function installMediaWiki(rawConfig) {
         '--dbprefix=mw_',
         `--server=http://localhost:${DEFAULT_PHP_PORT}`,
         '--scriptpath=',
+        // Content and interface language: sets $wgLanguageCode in LocalSettings.php
+        `--lang=${WIKI_LANGUAGE}`,
         `--pass=${adminPassword}`,
         wikiName,
         adminUser
@@ -1236,15 +1308,20 @@ async function startServers() {
 
       const http = require('http');
       const server = http.createServer((req, res) => {
-        res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' });
+        // Mimic MediaWiki: every page refuses to be shown inside a frame
+        res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8', 'X-Frame-Options': 'DENY' });
+        const otherPage = req.url !== '/';
         res.end(`
-          <html dir="rtl">
-            <head><title>המכלול - אתר בדיקה</title></head>
+          <html dir="rtl" lang="${WIKI_LANGUAGE}">
+            <head><meta charset="utf-8"><title>המכלול - אתר בדיקה</title></head>
             <body style="font-family: Arial; direction: rtl; padding: 20px;">
-              <h1>המכלול אופליין - אתר בדיקה</h1>
+              <h1>${otherPage ? 'דף בדיקה' : 'המכלול אופליין - אתר בדיקה'}</h1>
               <p>זהו אתר דמה לצורך בדיקת האפליקציה במצב "על יבש".</p>
               <p>פורט PHP: ${phpPort}</p>
               <p>פורט MySQL: ${mysqlPort}</p>
+              <p><a id="internal-link" href="/index.php?title=Test">דף בדיקה</a></p>
+              <p><a id="external-link" href="https://www.example.org/">קישור חיצוני</a></p>
+              <p><a id="new-window-link" href="https://www.example.org/new" target="_blank">קישור בחלון חדש</a></p>
             </body>
           </html>
         `);
@@ -1342,6 +1419,9 @@ module.exports = {
   dbServerArgs,
   getPaths,
   getStatus,
+  events,
+  checkAdminCredentials,
+  WIKI_LANGUAGE,
   cleanupStaleProcesses,
   isDevMode,
   removeDevStandIns,

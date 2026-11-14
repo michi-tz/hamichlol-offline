@@ -133,9 +133,9 @@ describe('Locating installed software', function() {
       const first = installFakeProgram(path.join(tempDir, 'first', 'php'), FAKE_PHP);
       installFakeProgram(path.join(tempDir, 'second', 'php'), FAKE_PHP);
       process.env.PATH = [path.join(tempDir, 'first'), path.join(tempDir, 'second'), process.env.PATH].join(path.delimiter);
-      process.env.FAKE_PHP_VERSION = '8.2.99';
+      process.env.FAKE_PHP_VERSION = '8.3.99';
 
-      expect(systemTools.findSystemPhp()).to.include({ exe: first, version: '8.2.99', usable: true });
+      expect(systemTools.findSystemPhp()).to.include({ exe: first, version: '8.3.99', usable: true });
     });
 
     it('should prefer an explicitly configured PHP over PATH', function() {
@@ -185,14 +185,26 @@ describe('Locating installed software', function() {
       expect(result.reason).to.include('CLI');
     });
 
-    it('should accept the oldest supported version and reject the one before it', function() {
+    it('should accept only the branch the app is pinned to', function() {
       const exe = installFakeProgram(path.join(tempDir, 'php'), FAKE_PHP);
 
-      process.env.FAKE_PHP_VERSION = systemTools.MIN_VERSIONS.php;
-      expect(systemTools.findSystemPhp([exe]).usable).to.be.true;
+      for (const patch of ['0', '36', '99']) {
+        process.env.FAKE_PHP_VERSION = `${systemTools.PHP_BRANCH}.${patch}`;
+        expect(systemTools.findSystemPhp([exe]).usable, patch).to.be.true;
+      }
 
-      process.env.FAKE_PHP_VERSION = '8.0.30';
-      expect(systemTools.findSystemPhp([exe]).usable).to.be.false;
+      // 8.30 must not pass as 8.3
+      for (const version of ['8.0.30', '8.2.30', '8.4.2', '8.5.4', '8.30.1', '9.3.0']) {
+        process.env.FAKE_PHP_VERSION = version;
+        const result = systemTools.findSystemPhp([exe]);
+        expect(result.usable, version).to.be.false;
+        expect(result.reason, version).to.include(systemTools.PHP_BRANCH);
+      }
+    });
+
+    it('should be pinned to the branch of the PHP that would be downloaded', function() {
+      const { DOWNLOADS } = require('../src/versions');
+      expect(DOWNLOADS.php.version.startsWith(`${systemTools.PHP_BRANCH}.`)).to.be.true;
     });
 
     it('should read the version from distribution-specific version strings', function() {
@@ -241,17 +253,17 @@ describe('Locating installed software', function() {
       const dir = path.join(tempDir, 'bin');
       const exe = installFakeProgram(path.join(dir, 'php'), FAKE_PHP);
       process.env.PATH = [dir, process.env.PATH].join(path.delimiter);
-      process.env.FAKE_PHP_VERSION = '8.2.1';
+      process.env.FAKE_PHP_VERSION = '8.3.1';
 
-      expect(systemTools.findSystemPhp()).to.include({ exe, version: '8.2.1' });
+      expect(systemTools.findSystemPhp()).to.include({ exe, version: '8.3.1' });
 
       // The installation changes, but the cached answer is returned...
-      process.env.FAKE_PHP_VERSION = '8.4.2';
-      expect(systemTools.findSystemPhp().version).to.equal('8.2.1');
+      process.env.FAKE_PHP_VERSION = '8.3.2';
+      expect(systemTools.findSystemPhp().version).to.equal('8.3.1');
 
       // ...until the cache is reset
       systemTools.resetCache();
-      expect(systemTools.findSystemPhp().version).to.equal('8.4.2');
+      expect(systemTools.findSystemPhp().version).to.equal('8.3.2');
     });
 
     it('should not cache or be influenced by lookups with explicit candidates', function() {

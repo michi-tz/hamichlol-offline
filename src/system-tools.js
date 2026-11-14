@@ -8,13 +8,14 @@
 const fs = require('fs');
 const path = require('path');
 const { execFileSync } = require('child_process');
+const { PHP_BRANCH } = require('./versions');
 
 const IS_WINDOWS = process.platform === 'win32';
 const INSPECT_TIMEOUT_MS = 15000;
 
 // Oldest versions that work with the MediaWiki versions this app installs.
+// PHP has no minimum: only the branch in versions.js is accepted.
 const MIN_VERSIONS = {
-  php: '8.1.0',
   mariadb: '10.3.0',
   // 5.7.6 introduced "mysqld --initialize-insecure", which creates the data folder
   mysql: '5.7.6',
@@ -205,8 +206,8 @@ function inspectPhp(exe) {
 
   if (info.sapi !== 'cli') {
     result.reason = 'נדרש PHP בגרסת שורת הפקודה (CLI)';
-  } else if (!version || compareVersions(result.version, MIN_VERSIONS.php) < 0) {
-    result.reason = `נדרשת גרסה ${MIN_VERSIONS.php} ומעלה`;
+  } else if (!version || !result.version.startsWith(`${PHP_BRANCH}.`)) {
+    result.reason = `נדרשת גרסה ${PHP_BRANCH}`;
   } else {
     const missing = REQUIRED_PHP_EXTENSIONS.filter(extension => !info.extensions.includes(extension));
     if (missing.length > 0) {
@@ -366,6 +367,7 @@ function findSystemMediaWiki(candidates) {
 module.exports = {
   ENV,
   MIN_VERSIONS,
+  PHP_BRANCH,
   REQUIRED_PHP_EXTENSIONS,
   isEnabled,
   resetCache,
