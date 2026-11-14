@@ -20,6 +20,8 @@ const { _electron: electron } = require('playwright-core');
 const { makeTempDir, removeDir } = require('../helpers');
 
 const APP_DIR = path.join(__dirname, '..', '..');
+// The main process's own copy, reached from app.evaluate()
+const SERVER_MANAGER = path.join(APP_DIR, 'src', 'server-manager.js');
 
 // Chromium's sandbox cannot start as root, nor on CI runners that restrict
 // unprivileged user namespaces; HAMICHLOL_E2E_NO_SANDBOX=1 turns it off there.
@@ -469,6 +471,107 @@ describe('Application window (dev mode)', function() {
       await page.waitForFunction(() => !document.body.classList.contains('wiki-mode'));
       expect(await visibleSteps()).to.deep.equal(['step3']);
       expect(await menuItem('start')).to.include({ enabled: true });
+    });
+
+    it('should show a failed stop in the bar while the wiki stays open', async function() {
+      await page.click('#startServersBtn');
+      const { url } = await wikiView();
+      const indicator = '#serversIndicator';
+      const MESSAGE = 'Failed to stop PHP (pid 12345): the process did not exit within 10 seconds';
+      expect(await page.getAttribute(indicator, 'class')).to.include('running');
+
+      // The next stop fails before the servers are down, as when a server
+      // process survives being killed (main.js looks stopServers up on the
+      // server manager at each call)
+      await app.evaluate((electron, [file, message]) => {
+        const serverManager = process.mainModule.require(file);
+        const { stopServers } = serverManager;
+        serverManager.stopServers = async () => {
+          serverManager.stopServers = stopServers;
+          throw new Error(message);
+        };
+      }, [SERVER_MANAGER, MESSAGE]);
+      await page.click('#stopServersBtn');
+      await page.waitForFunction(() => document.getElementById('serversIndicator').classList.contains('error'));
+
+      // Reported in the bar, the only part of the page the wiki leaves visible
+      expect(await page.isVisible(indicator)).to.be.true;
+      expect(await page.isVisible('#status')).to.be.false;
+      const shown = await page.textContent(indicator);
+      expect(shown).to.include('הכיבוי נכשל').and.include(MESSAGE);
+      expect(shown).to.not.include('השרתים פועלים');
+      expect(await page.getAttribute(indicator, 'title')).to.equal(`שגיאה בכיבוי השרתים: ${MESSAGE}`);
+      expect(await page.getAttribute(indicator, 'role')).to.equal('alert');
+      // The servers and the wiki are still there, and can be stopped again
+      expect(await wikiMode()).to.be.true;
+      expect((await viewInfo()).url).to.equal(url);
+      expect(await page.isEnabled('#stopServersBtn')).to.be.true;
+      // The bar keeps its height
+      expect(await page.$eval('#wikiBar', bar => bar.getBoundingClientRect().height)).to.equal(48);
+
+      // At the smallest window size the message is cut short, not wrapped
+      await app.evaluate(({ BrowserWindow }) => BrowserWindow.getAllWindows()[0].setSize(760, 560));
+      await page.waitForFunction(() => window.innerWidth <= 760);
+      const layout = await page.evaluate(() => {
+        const bar = document.getElementById('wikiBar');
+        const text = document.getElementById('serversIndicatorText');
+        const message = text.querySelector('.bar-status-detail');
+        const stopButton = document.getElementById('stopServersBtn');
+        const stop = stopButton.getBoundingClientRect();
+        return {
+          barHeight: bar.getBoundingClientRect().height,
+          textHeight: text.getBoundingClientRect().height,
+          stopHeight: stop.height,
+          truncated: message.scrollWidth > message.clientWidth,
+          stopInside: stop.left >= 0 && stop.right <= window.innerWidth,
+          overflows: bar.scrollWidth > bar.clientWidth
+        };
+      });
+      expect(layout).to.deep.include({ barHeight: 48, truncated: true, stopInside: true, overflows: false });
+      // One line each: neither the message nor the stop button wraps
+      expect(layout.textHeight).to.be.below(24);
+      expect(layout.stopHeight).to.equal(32);
+
+      // A stop that works clears the error and returns to the setup screen
+      await page.click('#stopServersBtn');
+      await page.waitForFunction(() => !document.body.classList.contains('wiki-mode'));
+      expect(await viewInfo()).to.be.null;
+      expect(await visibleSteps()).to.deep.equal(['step3']);
+      expect(await status()).to.include('אפשר להפעיל');
+      expect(await page.getAttribute('#status', 'class')).to.not.include('error');
+
+      // And the next start shows the plain "running" pill again
+      await page.click('#startServersBtn');
+      await wikiView();
+      expect(await page.getAttribute(indicator, 'class')).to.include('running');
+      expect(await page.textContent(indicator)).to.include('השרתים פועלים');
+      expect(await page.getAttribute(indicator, 'role')).to.equal('status');
+    });
+
+    it('should show a stop or restart in progress in the bar', async function() {
+      await page.click('#startServersBtn');
+      await wikiView();
+
+      // Hold the next stop until the test lets it go
+      await app.evaluate((electron, file) => {
+        const serverManager = process.mainModule.require(file);
+        const { stopServers } = serverManager;
+        serverManager.stopServers = async () => {
+          serverManager.stopServers = stopServers;
+          await new Promise(resolve => { global.releaseStop = resolve; });
+          return stopServers();
+        };
+      }, SERVER_MANAGER);
+      await clickMenuItem('restart');
+      await page.waitForFunction(() => document.getElementById('serversIndicator').classList.contains('busy'));
+      expect(await page.textContent('#serversIndicator')).to.include('מפעיל מחדש את השרתים');
+      expect(await page.isVisible('#serversIndicator .spinner')).to.be.true;
+      expect(await page.isEnabled('#stopServersBtn')).to.be.false;
+
+      await app.evaluate(() => global.releaseStop());
+      await page.waitForFunction(() => document.getElementById('serversIndicator').classList.contains('running'));
+      expect((await wikiView()).heading).to.include('אתר בדיקה');
+      expect(await page.textContent('#serversIndicator')).to.include('השרתים פועלים');
     });
 
     it('should stop the servers when the app is closed', async function() {

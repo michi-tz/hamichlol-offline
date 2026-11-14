@@ -758,6 +758,40 @@ describe('Electron main process', function() {
       expect((await invoke('get-status')).error).to.be.null;
     });
 
+    // A stop that fails before the servers are down, as when a server process
+    // survives being killed: the servers keep running, with the wiki shown
+    async function failNextStop(action, message) {
+      const { stopServers } = serverManager;
+      serverManager.stopServers = async () => {
+        serverManager.stopServers = stopServers;
+        throw new Error(message);
+      };
+      try {
+        return await invoke(action);
+      } finally {
+        serverManager.stopServers = stopServers;
+      }
+    }
+
+    for (const action of ['stop', 'restart']) {
+      it(`should report a failed ${action} while the servers keep running`, async function() {
+        const result = await failNextStop(`${action}-servers`, 'PHP did not exit');
+
+        expect(result).to.deep.equal({ success: false, error: 'PHP did not exit' });
+        expect(view()).to.exist;
+        const state = stateUpdates(window).pop();
+        expect(state).to.include({ running: true, busy: null, wikiShown: true });
+        expect(state.error).to.deep.equal({ action, message: 'PHP did not exit' });
+        expect(findItem(fake.menu.current, 'stop').enabled).to.be.true;
+        expect((await invoke('get-status')).error).to.deep.equal({ action, message: 'PHP did not exit' });
+
+        // Not a crash: the servers are still running, and the next stop clears the error
+        expect(await invoke('stop-servers')).to.deep.equal({ success: true });
+        expect(stateUpdates(window).pop()).to.include({ running: false, error: null, wikiShown: false });
+        expect(view()).to.be.null;
+      });
+    }
+
     it('should show the wiki again in a window that is opened again', async function() {
       const first = view();
       window.close();

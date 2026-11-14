@@ -5,7 +5,10 @@ const serverManager = require('./server-manager');
 const { APP_NAME, buildMenuTemplate } = require('./menu');
 const { WikiView } = require('./wiki-view');
 
-const { setDataPath, setFetch, isDevMode, removeDevStandIns, getPaths, getStatus, cleanupStaleProcesses, downloadServers, installMediaWiki, startServers, stopServers } = serverManager;
+// Starting and stopping are looked up on the module at each call rather than
+// bound here, so tests can make them fail (e.g. a stop that leaves the servers
+// running, which is otherwise hard to bring about)
+const { setDataPath, setFetch, isDevMode, removeDevStandIns, getPaths, getStatus, cleanupStaleProcesses, downloadServers, installMediaWiki } = serverManager;
 
 // Matches the page's background, so the window never flashes white
 const WINDOW_BACKGROUND = '#f4f6fa';
@@ -123,7 +126,7 @@ function setupApp() {
     event.preventDefault();
     isQuitting = true;
     try {
-      await stopServers();
+      await serverManager.stopServers();
     } catch (error) {
       console.error('Failed to stop servers on quit:', error);
     }
@@ -234,16 +237,16 @@ const operations = {
   }, 'Failed to install MediaWiki'),
 
   start: () => runOperation('start', async () => {
-    return startServers();
+    return serverManager.startServers();
   }, 'Failed to start servers'),
 
   stop: () => runOperation('stop', async () => {
-    await stopServers();
+    await serverManager.stopServers();
   }, 'Failed to stop servers'),
 
   restart: () => runOperation('restart', async () => {
-    await stopServers();
-    return startServers();
+    await serverManager.stopServers();
+    return serverManager.startServers();
   }, 'Failed to restart servers')
 };
 

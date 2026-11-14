@@ -548,8 +548,12 @@
     .bar-status {
       display: flex;
       align-items: center;
+      flex: 0 1 auto;
+      min-width: 0;
+      max-width: min(360px, 40vw);
       gap: 6px;
-      padding: 4px 10px;
+      padding: 3px 10px;
+      border: 1px solid transparent;
       border-radius: 999px;
       background: var(--success-soft);
       color: var(--success);
@@ -559,6 +563,7 @@
     }
 
     .bar-status .dot {
+      flex: none;
       width: 8px;
       height: 8px;
       border-radius: 50%;
@@ -566,7 +571,54 @@
       box-shadow: 0 0 0 3px rgba(21, 128, 61, 0.15);
     }
 
+    /* The page below the bar is covered by the wiki, so while the wiki is shown
+       the bar is the only place to report an operation in progress or a failed
+       one (e.g. a stop that left the servers running). The text gives way to
+       the rest of the bar and is cut with an ellipsis; the full text is in the
+       element (and its tooltip). */
+    .bar-status-text {
+      display: flex;
+      min-width: 0;
+      gap: 4px;
+    }
+
+    /* The error message, often English: isolated, so it is cut at its own end */
+    .bar-status-detail {
+      min-width: 0;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      font-weight: 500;
+    }
+    .bar-status-detail:empty { display: none; }
+
+    .bar-status .spinner,
+    .bar-status .bar-status-icon { display: none; }
+    .bar-status .spinner { width: 12px; height: 12px; }
+
+    .bar-status-icon {
+      flex: none;
+      width: 16px;
+      height: 16px;
+    }
+
+    .bar-status.busy { background: var(--primary-soft); color: var(--primary); }
+    .bar-status.busy .dot { display: none; }
+    .bar-status.busy .spinner { display: inline-block; }
+
+    .bar-status.error {
+      background: var(--danger-soft);
+      color: var(--danger);
+      border-color: var(--danger-border);
+      cursor: help;
+    }
+    .bar-status.error .dot { display: none; }
+    .bar-status.error .bar-status-icon { display: inline-block; }
+
+    /* Only the page title and the status pill give way in a narrow window */
+    .bar-brand, .icon-btn, .bar-divider, .wiki-bar .btn { flex: none; }
+
     .wiki-bar .btn {
+      white-space: nowrap;
       min-height: 32px;
       padding: 4px 14px;
       font-size: 13px;
@@ -620,7 +672,12 @@
       <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M4 11l8-7 8 7"/><path d="M6 9.5V20h12V9.5"/></svg>
     </button>
     <div class="bar-title" id="wikiTitle"></div>
-    <div class="bar-status" id="serversIndicator"><span class="dot"></span><span>השרתים פועלים</span></div>
+    <div class="bar-status running" id="serversIndicator" role="status">
+      <span class="dot" aria-hidden="true"></span>
+      <span class="spinner" aria-hidden="true"></span>
+      <svg class="bar-status-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true"><circle cx="12" cy="12" r="9"/><path d="M12 7.5v5.5"/><path d="M12 16.5v.01"/></svg>
+      <span class="bar-status-text" id="serversIndicatorText"><span class="bar-status-label">השרתים פועלים</span><bdi class="bar-status-detail" dir="auto"></bdi></span>
+    </div>
     <button type="button" class="icon-btn" id="wikiExternalBtn" title="פתח בדפדפן חיצוני" aria-label="פתח בדפדפן חיצוני">
       <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M14 4h6v6"/><path d="M20 4l-9 9"/><path d="M18 14v5a1 1 0 0 1-1 1H5a1 1 0 0 1-1-1V7a1 1 0 0 1 1-1h5"/></svg>
     </button>
@@ -759,6 +816,9 @@
     const adminPasswordInput = document.getElementById('adminPassword');
     const adminPasswordRules = document.getElementById('adminPasswordRules');
     const wikiTitle = document.getElementById('wikiTitle');
+    const serversIndicator = document.getElementById('serversIndicator');
+    const serversIndicatorLabel = document.querySelector('#serversIndicatorText .bar-status-label');
+    const serversIndicatorDetail = document.querySelector('#serversIndicatorText .bar-status-detail');
     const wikiButtons = {
       back: document.getElementById('wikiBackBtn'),
       forward: document.getElementById('wikiForwardBtn'),
@@ -786,6 +846,42 @@
       stop: 'מכבה שרתים...',
       restart: 'מפעיל מחדש את השרתים...'
     };
+
+    // Short forms for the wiki bar; the full text is in its tooltip
+    const BAR_ERROR_LABELS = {
+      start: 'ההפעלה נכשלה',
+      stop: 'הכיבוי נכשל',
+      restart: 'ההפעלה מחדש נכשלה'
+    };
+
+    const busyText = busy => BUSY_MESSAGES[busy] || 'עובד...';
+    const errorText = error => `${ERROR_PREFIXES[error.action] || 'שגיאה'}: ${error.message}`;
+
+    // The pill in the wiki bar. While the wiki is shown it covers the status
+    // line, so the bar shows an operation in progress or a failed one (a stop
+    // or restart that left the servers running) in place of "running".
+    function showServersIndicator() {
+      const { busy, error, running } = state;
+      let kind = 'running';
+      let label = 'השרתים פועלים';
+      let detail = '';
+      let title = running ? `PHP: ${state.phpPort}, MySQL: ${state.mysqlPort}` : '';
+      if (busy) {
+        kind = 'busy';
+        label = title = busyText(busy);
+      } else if (error) {
+        kind = 'error';
+        label = `${BAR_ERROR_LABELS[error.action] || 'שגיאה'}:`;
+        detail = error.message;
+        title = errorText(error);
+      }
+      serversIndicator.className = `bar-status ${kind}`;
+      serversIndicator.title = title;
+      // Announced at once when it fails, politely otherwise
+      serversIndicator.setAttribute('role', kind === 'error' ? 'alert' : 'status');
+      serversIndicatorLabel.textContent = label;
+      serversIndicatorDetail.textContent = detail;
+    }
 
     // kind: 'idle', 'busy', 'error' or 'success'
     function setStatus(message, kind = 'idle') {
@@ -894,13 +990,12 @@
       setLoading(startServersBtn, busy === 'start' || busy === 'restart');
       setLoading(stopServersBtn, busy === 'stop' || busy === 'restart');
 
-      const indicator = document.getElementById('serversIndicator');
-      indicator.title = running ? `PHP: ${state.phpPort}, MySQL: ${state.mysqlPort}` : '';
+      showServersIndicator();
 
       if (busy) {
-        setStatus(BUSY_MESSAGES[busy] || 'עובד...', 'busy');
+        setStatus(busyText(busy), 'busy');
       } else if (error) {
-        setStatus(`${ERROR_PREFIXES[error.action] || 'שגיאה'}: ${error.message}`, 'error');
+        setStatus(errorText(error), 'error');
       } else if (running) {
         setStatus(`השרתים פועלים (PHP: ${state.phpPort}, MySQL: ${state.mysqlPort})`, 'success');
       } else if (!state.downloaded) {
