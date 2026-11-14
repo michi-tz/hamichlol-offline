@@ -294,7 +294,8 @@ describe('Real installation flow with fake servers', function() {
       const ports = await startServers();
       const paths = getPaths();
 
-      const info = await (await fetch(`http://127.0.0.1:${ports.phpPort}/index.php`)).json();
+      const { args, ...info } = await (await fetch(`http://127.0.0.1:${ports.phpPort}/index.php`)).json();
+      expect(args).to.be.an('array');
       expect(info).to.deep.equal({
         dbPort: String(ports.mysqlPort),
         docroot: paths.mediaWikiPath,
@@ -303,6 +304,34 @@ describe('Real installation flow with fake servers', function() {
         url: '/index.php'
       });
       expect(getStatus()).to.include({ running: true, phpPort: ports.phpPort, mysqlPort: ports.mysqlPort });
+    });
+
+    it('should start the web server with the bytecode cache, before -S', async function() {
+      const ports = await startServers();
+
+      const { args } = await (await fetch(`http://127.0.0.1:${ports.phpPort}/`)).json();
+      const settings = args.filter((arg, index) => args[index - 1] === '-d');
+      expect(settings).to.include.members(['zend_extension=opcache', 'opcache.enable=1']);
+      expect(args.slice(0, 2)).to.deep.equal(['-c', getPaths().phpIni]);
+      expect(args.lastIndexOf('-d')).to.be.below(args.indexOf('-S'));
+    });
+
+    it('should log the server output on stderr as ordinary output, not as an error', async function() {
+      process.env.FAKE_PHP_SERVER_LOG = 'Fake PHP Development Server started';
+      const logged = [];
+      const errors = [];
+      const { log, error } = console;
+      console.log = (...items) => logged.push(items.join(' '));
+      console.error = (...items) => errors.push(items.join(' '));
+      try {
+        await startServers();
+        expect(await waitFor(() => logged.some(line => line.includes('Development Server started')))).to.be.true;
+      } finally {
+        Object.assign(console, { log, error });
+        delete process.env.FAKE_PHP_SERVER_LOG;
+      }
+      expect(logged).to.include('PHP: Fake PHP Development Server started');
+      expect(errors.join('\n')).to.not.include('Development Server started');
     });
 
     it('should only listen on the loopback interface', async function() {
@@ -528,6 +557,8 @@ describe('Real installation flow with installed software', function() {
         expect(installArgs).to.not.include('-c');
         const info = await (await fetch(`http://127.0.0.1:${ports.phpPort}/`)).json();
         expect(info.ini).to.be.null;
+        // Nor any -d setting: an installed PHP is not tuned by the app
+        expect(info.args).to.not.include('-d');
       });
 
       it('should put nothing into the data folder but the database and the wiki', async function() {

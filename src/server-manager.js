@@ -229,7 +229,7 @@ const PHP_SERVER_TUNING = [
 ];
 
 function phpServerArgs(php, args) {
-  const tuning = true ? PHP_SERVER_TUNING.flatMap(setting => ['-d', setting]) : [];
+  const tuning = php.ini ? PHP_SERVER_TUNING.flatMap(setting => ['-d', setting]) : [];
   return phpArgs(php, [...tuning, ...args]);
 }
 

@@ -12,6 +12,8 @@
 //   FAKE_PHP_VERSION, FAKE_PHP_SAPI, FAKE_PHP_EXTENSIONS (comma separated)
 //   FAKE_PHP_INSTALL_FAILS   the installer prints an error and exits with 1
 //   FAKE_PHP_SERVER_FAILS    the web server exits immediately
+//   FAKE_PHP_SERVER_LOG      the web server writes this line to stderr on start,
+//                            as PHP does with its ordinary log
 
 const fs = require('fs');
 const http = require('http');
@@ -54,6 +56,9 @@ if (args[0] === '-r') {
     process.exit(1);
   }
   const [host, port] = valueAfter('-S').split(':');
+  if (process.env.FAKE_PHP_SERVER_LOG) {
+    process.stderr.write(`${process.env.FAKE_PHP_SERVER_LOG}\n`);
+  }
   http.createServer((request, response) => {
     response.setHeader('Content-Type', 'application/json');
     response.end(JSON.stringify({
@@ -61,7 +66,8 @@ if (args[0] === '-r') {
       docroot: valueAfter('-t'),
       ini: valueAfter('-c'),
       cwd: process.cwd(),
-      url: request.url
+      url: request.url,
+      args
     }));
   }).listen(Number(port), host);
 }
