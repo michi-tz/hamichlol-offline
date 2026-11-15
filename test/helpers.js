@@ -100,6 +100,17 @@ function setEnv(values) {
   };
 }
 
+// Skip a system test whose software is missing, unless the run requires it
+// (HAMICHLOL_SYSTEM_TESTS_REQUIRED, set by CI): then the missing software is
+// a failure, so the suite cannot pass by silently testing nothing.
+function skipUnlessRequired(context, reason) {
+  if (/^(1|true|yes|on)$/i.test(process.env.HAMICHLOL_SYSTEM_TESTS_REQUIRED || '')) {
+    throw new Error(`Required by HAMICHLOL_SYSTEM_TESTS_REQUIRED but ${reason}`);
+  }
+  console.log(`    Skipped: ${reason}`);
+  context.skip();
+}
+
 const VALID_CONFIG = {
   dbName: 'test_wiki',
   dbUser: 'test_user',
@@ -124,5 +135,6 @@ module.exports = {
   readLines,
   occupyPort,
   closeServer,
-  setEnv
+  setEnv,
+  skipUnlessRequired
 };

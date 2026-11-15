@@ -4,8 +4,11 @@
 // Not part of `npm test`:
 //   npm run test:system
 //
-// The suite is skipped when suitable software is not installed. On Ubuntu:
-//   sudo apt install php-cli php-mysql php-intl php-mbstring php-xml mariadb-server mediawiki
+// The suite is skipped when suitable software is not installed, unless
+// HAMICHLOL_SYSTEM_TESTS_REQUIRED is set (as in CI): then it fails. On Ubuntu:
+//   sudo apt install php-cli php-mysql php-intl php-mbstring php-xml mariadb-server
+// MediaWiki must be of the branch in src/versions.js, which distributions do
+// not package: extract the release and point HAMICHLOL_MEDIAWIKI_DIR at it.
 // The system's own database service is not used or touched, and does not need
 // to be running: the app starts its own server process on its own data folder.
 
@@ -15,7 +18,7 @@ const fs = require('fs');
 const path = require('path');
 const { spawn } = require('child_process');
 
-const { makeTempDir, removeDir, isAlive, waitFor, readJson, setEnv } = require('../helpers');
+const { makeTempDir, removeDir, isAlive, waitFor, readJson, setEnv, skipUnlessRequired } = require('../helpers');
 const systemTools = require('../../src/system-tools');
 const serverManager = require('../../src/server-manager');
 
@@ -67,10 +70,9 @@ describe('Real installed software', function() {
       .filter(([, tool]) => !tool || !tool.usable)
       .map(([name, tool]) => `${name}${tool ? ` (${tool.reason})` : ''}`);
     if (missing.length > 0) {
-      console.log(`    Skipped: not installed or not suitable: ${missing.join(', ')}`);
       restoreEnv();
       restoreEnv = null;
-      this.skip();
+      skipUnlessRequired(this, `not installed or not suitable: ${missing.join(', ')}`);
     }
     console.log(`    PHP ${found.PHP.version}, ${found['MariaDB/MySQL'].flavor} ${found['MariaDB/MySQL'].version}, MediaWiki ${found.MediaWiki.version}`);
 

@@ -201,7 +201,7 @@ PHP ו-MariaDB מותקנים בתיקיות לפי גרסה, כך שגרסה ח
 | פקודה | מה נבדק | מה נדרש |
 |-------|---------|---------|
 | `npm test` | הלוגיקה כולה: מצב פיתוח, מסלול ההתקנה וההפעלה האמיתי מול תוכנות דמה, שדרוג ויקי מותקן והתאוששות משדרוג שנקטע, הורדות מול שרת מקומי, איתור תוכנות מותקנות, בדיקות שם המשתמש והסיסמה של המנהל, התפריט, התהליך הראשי של Electron ותצוגת הוויקי | Node.js בלבד |
-| `npm run test:system` | המסלול המלא מול PHP, ‏MariaDB/MySQL ו-MediaWiki אמיתיים שמותקנים במחשב, כולל כניסה לוויקי והתאוששות מקריסה | התוכנות מותקנות (אחרת הבדיקה מדולגת) |
+| `npm run test:system` | המסלול המלא מול PHP, ‏MariaDB/MySQL ו-MediaWiki אמיתיים שמותקנים במחשב, כולל כניסה לוויקי והתאוששות מקריסה, ושדרוג אמיתי של ויקי מגרסה 1.43 לגרסה של האפליקציה | התוכנות מותקנות (אחרת הבדיקה מדולגת) |
 | `npm run test:e2e` | חלון האפליקציה עצמו, דרך Playwright, במצב פיתוח: השלבים, הטופס, התפריט, והוויקי שממלא את החלון | תצוגה (בלינוקס בלי מסך: `xvfb-run -a npm run test:e2e`) |
 
 `npm run test:all` מריץ את שלושתן, ו-`npm run coverage` מפיק דוח כיסוי בתיקיית `coverage`.
@@ -210,14 +210,36 @@ PHP ו-MariaDB מותקנים בתיקיות לפי גרסה, כך שגרסה ח
 (`test/fixtures`), ותוכנת הדמה של מסד הנתונים מדברת בפרוטוקול של MySQL, כך שהחיבור, שאילתות ההקמה
 והכיבוי של האפליקציה נבדקים באמת. חלק מהבדיקות האלה מדולגות ב-Windows, שם אי אפשר להריץ את תוכנות הדמה.
 
-להרצת `test:system` באובונטו:
+להרצת `test:system` באובונטו 24.04 (שבה PHP הוא מהענף שהאפליקציה דורשת):
 
 ```bash
-sudo apt install php-cli php-mysql php-intl php-mbstring php-xml mariadb-server mediawiki
+sudo apt install php-cli php-mysql php-intl php-mbstring php-xml mariadb-server
+```
+
+חבילת `mediawiki` של אובונטו היא מגרסה ישנה (1.39), ו-MediaWiki שנמצא במחשב משמש רק אם הוא מהענף
+שב-`src/versions.js`. לכן מורידים את הגרסה שהאפליקציה עצמה מורידה (הכתובת מודפסת ב-`node scripts/mediawiki-release.js`),
+פורסים אותה ומפנים אליה את `HAMICHLOL_MEDIAWIKI_DIR`. בדיקת השדרוג צריכה בנוסף את הגרסה הישנה פרוסה
+ב-`HAMICHLOL_TEST_OLD_MEDIAWIKI_DIR` ואת קובץ ה-zip של הגרסה החדשה ב-`HAMICHLOL_TEST_MEDIAWIKI_ZIP`
+(הוא מוגש לאפליקציה במקום ההורדה), ואחרת היא מדולגת:
+
+```bash
+eval "$(node scripts/mediawiki-release.js 1.43.11)"   # version, url, old_version, old_url
+mkdir -p ~/mediawiki-releases && cd ~/mediawiki-releases
+curl -fLO "$url" && curl -fLO "$old_url"
+unzip -q "mediawiki-$version.zip" && tar -xzf "mediawiki-$old_version.tar.gz"
+cd -
+HAMICHLOL_MEDIAWIKI_DIR=~/mediawiki-releases/mediawiki-$version \
+HAMICHLOL_TEST_OLD_MEDIAWIKI_DIR=~/mediawiki-releases/mediawiki-$old_version \
+HAMICHLOL_TEST_MEDIAWIKI_ZIP=~/mediawiki-releases/mediawiki-$version.zip \
+npm run test:system
 ```
 
 ב-GitHub Actions‏ (`.github/workflows/test.yml`) רצות הבדיקות הרגילות בלינוקס, ב-Windows וב-macOS,
-ובנוסף בדיקות המערכת וחלון האפליקציה באובונטו.
+ובנוסף בדיקות המערכת (כולל בדיקת השדרוג) וחלון האפליקציה באובונטו 24.04. שם PHP ו-MariaDB מותקנים
+מחבילות אובונטו, וקובצי MediaWiki (הגרסה של `src/versions.js` מאותה כתובת שהאפליקציה מורידה, והגרסה
+הישנה לבדיקת השדרוג) נשמרים במטמון של GitHub Actions לפי הגרסאות, כך שהם יורדים רק כשגרסה משתנה.
+גם קובץ Electron נשמר במטמון. המשתנה `HAMICHLOL_SYSTEM_TESTS_REQUIRED=1` הופך שם תוכנה חסרה לכישלון
+במקום דילוג, כך שהבדיקות לא יכולות לעבור בלי לבדוק דבר.
 
 ## מבנה הפרויקט
 
