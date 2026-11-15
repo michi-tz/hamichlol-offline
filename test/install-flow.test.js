@@ -24,6 +24,7 @@ const {
   setEnv
 } = require('./helpers');
 const serverManager = require('../src/server-manager');
+const { MEDIAWIKI_BRANCH } = require('../src/versions');
 
 const { setDataPath, getPaths, getStatus, installMediaWiki, startServers, stopServers } = serverManager;
 
@@ -444,7 +445,7 @@ describe('Real installation flow with installed software', function() {
     }
     fs.writeFileSync(path.join(mediawiki, 'index.php'), '');
     fs.writeFileSync(path.join(mediawiki, 'maintenance', 'install.php'), '');
-    fs.writeFileSync(path.join(mediawiki, 'includes', 'Defines.php'), "<?php\ndefine( 'MW_VERSION', '1.43.1' );\n");
+    fs.writeFileSync(path.join(mediawiki, 'includes', 'Defines.php'), `<?php\ndefine( 'MW_VERSION', '${MEDIAWIKI_BRANCH}.1' );\n`);
 
     Object.assign(process.env, {
       HAMICHLOL_PHP: programs.php,

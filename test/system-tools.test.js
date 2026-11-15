@@ -18,6 +18,13 @@ const {
 } = require('./helpers');
 const systemTools = require('../src/system-tools');
 
+// A version of the MediaWiki branch this app installs, and of other branches
+const BRANCH = systemTools.MEDIAWIKI_BRANCH;
+const SAME_BRANCH = `${BRANCH}.1`;
+const [MAJOR, MINOR] = BRANCH.split('.').map(Number);
+const OLDER_BRANCH = `${MAJOR}.${MINOR - 1}.9`;
+const NEWER_BRANCH = `${MAJOR}.${MINOR + 1}.0`;
+
 // The fake programs are started through "#!/usr/bin/env node", so a PATH
 // built for a test still has to contain the folder of the node binary.
 const NODE_DIR = path.dirname(process.execPath);
@@ -367,14 +374,14 @@ describe('Locating installed software', function() {
 
   describe('MediaWiki', function() {
     it('should use the explicitly configured folder', function() {
-      const dir = fakeMediaWiki('wiki', '1.43.1');
+      const dir = fakeMediaWiki('wiki', SAME_BRANCH);
       process.env.HAMICHLOL_MEDIAWIKI_DIR = dir;
 
-      expect(systemTools.findSystemMediaWiki()).to.include({ dir, version: '1.43.1', usable: true });
+      expect(systemTools.findSystemMediaWiki()).to.include({ dir, version: SAME_BRANCH, usable: true });
     });
 
     it('should read the PHP requirement in the forms composer.json uses', function() {
-      const minPhp = composer => systemTools.findSystemMediaWiki([fakeMediaWiki(`w${Math.random()}`, '1.43.0', composer)]).minPhp;
+      const minPhp = composer => systemTools.findSystemMediaWiki([fakeMediaWiki(`w${Math.random()}`, SAME_BRANCH, composer)]).minPhp;
 
       expect(minPhp('{"require":{"php":">=8.1.0"}}')).to.equal('8.1.0');
       expect(minPhp('{"require":{"php":">= 8.2"}}')).to.equal('8.2');
@@ -382,7 +389,7 @@ describe('Locating installed software', function() {
     });
 
     it('should carry on without a PHP requirement when composer.json is missing or unusable', function() {
-      const minPhp = composer => systemTools.findSystemMediaWiki([fakeMediaWiki(`w${Math.random()}`, '1.43.0', composer)]);
+      const minPhp = composer => systemTools.findSystemMediaWiki([fakeMediaWiki(`w${Math.random()}`, SAME_BRANCH, composer)]);
 
       expect(minPhp(undefined)).to.include({ minPhp: null, usable: true });
       expect(minPhp('{ not json')).to.include({ minPhp: null, usable: true });
@@ -391,27 +398,37 @@ describe('Locating installed software', function() {
       expect(minPhp('{}')).to.include({ minPhp: null, usable: true });
     });
 
-    it('should accept the oldest supported version and reject the one before it', function() {
-      expect(systemTools.findSystemMediaWiki([fakeMediaWiki('min', systemTools.MIN_VERSIONS.mediawiki)]).usable).to.be.true;
-      const old = systemTools.findSystemMediaWiki([fakeMediaWiki('old', '1.38.7')]);
-      expect(old).to.include({ usable: false, version: '1.38.7' });
-      expect(old.reason).to.include(systemTools.MIN_VERSIONS.mediawiki);
+    it('should accept every release of the pinned branch and no other branch', function() {
+      for (const version of [`${BRANCH}.0`, SAME_BRANCH, `${BRANCH}.27`]) {
+        expect(systemTools.findSystemMediaWiki([fakeMediaWiki(`ok-${version}`, version)]), version).to.include({ usable: true });
+      }
+      for (const version of [OLDER_BRANCH, NEWER_BRANCH, '1.39.7', `${MAJOR + 1}.${MINOR}.0`]) {
+        const result = systemTools.findSystemMediaWiki([fakeMediaWiki(`no-${version}`, version)]);
+        expect(result, version).to.include({ usable: false, version });
+        expect(result.reason, version).to.include(BRANCH);
+      }
+    });
+
+    it('should not take a branch whose number only starts like the pinned one', function() {
+      // e.g. 1.4 and 1.46: the match is on whole numbers
+      const lookalike = `${BRANCH}0.0`;
+      expect(systemTools.findSystemMediaWiki([fakeMediaWiki('lookalike', lookalike)]).usable).to.be.false;
     });
 
     it('should read pre-release versions', function() {
-      expect(systemTools.findSystemMediaWiki([fakeMediaWiki('rc', '1.44.0-rc.0')])).to.include({ version: '1.44.0', usable: true });
-      expect(systemTools.findSystemMediaWiki([fakeMediaWiki('alpha', '1.45.0-alpha')])).to.include({ version: '1.45.0', usable: true });
+      expect(systemTools.findSystemMediaWiki([fakeMediaWiki('rc', `${BRANCH}.0-rc.0`)])).to.include({ version: `${BRANCH}.0`, usable: true });
+      expect(systemTools.findSystemMediaWiki([fakeMediaWiki('alpha', `${NEWER_BRANCH}-alpha`)])).to.include({ version: NEWER_BRANCH, usable: false });
     });
 
     it('should reject a source checkout without installed dependencies', function() {
-      const dir = fakeMediaWiki('git', '1.43.0');
+      const dir = fakeMediaWiki('git', SAME_BRANCH);
       fs.rmSync(path.join(dir, 'vendor'), { recursive: true });
 
       expect(systemTools.findSystemMediaWiki([dir])).to.include({ usable: false });
     });
 
     it('should reject a folder whose Defines.php has no version', function() {
-      const dir = fakeMediaWiki('odd', '1.43.0');
+      const dir = fakeMediaWiki('odd', SAME_BRANCH);
       fs.writeFileSync(path.join(dir, 'includes', 'Defines.php'), '<?php // nothing here');
 
       expect(systemTools.findSystemMediaWiki([dir])).to.include({ usable: false, version: null });
@@ -422,15 +439,15 @@ describe('Locating installed software', function() {
     });
 
     it('should remember the result until the cache is reset', function() {
-      const dir = fakeMediaWiki('wiki', '1.43.1');
+      const dir = fakeMediaWiki('wiki', SAME_BRANCH);
       process.env.HAMICHLOL_MEDIAWIKI_DIR = dir;
-      expect(systemTools.findSystemMediaWiki().version).to.equal('1.43.1');
+      expect(systemTools.findSystemMediaWiki().version).to.equal(SAME_BRANCH);
 
-      fs.writeFileSync(path.join(dir, 'includes', 'Defines.php'), "<?php\ndefine( 'MW_VERSION', '1.43.9' );\n");
-      expect(systemTools.findSystemMediaWiki().version).to.equal('1.43.1');
+      fs.writeFileSync(path.join(dir, 'includes', 'Defines.php'), `<?php\ndefine( 'MW_VERSION', '${BRANCH}.9' );\n`);
+      expect(systemTools.findSystemMediaWiki().version).to.equal(SAME_BRANCH);
 
       systemTools.resetCache();
-      expect(systemTools.findSystemMediaWiki().version).to.equal('1.43.9');
+      expect(systemTools.findSystemMediaWiki().version).to.equal(`${BRANCH}.9`);
     });
   });
 });

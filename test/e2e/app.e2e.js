@@ -605,6 +605,30 @@ describe('Application window (dev mode)', function() {
       expect(await page.isEnabled('#startServersBtn')).to.be.true;
     });
 
+    it('should offer to upgrade a wiki installed with an older MediaWiki, and upgrade it', async function() {
+      await download();
+      await install();
+      expect(await page.isVisible('#upgradeNotice')).to.be.false;
+      // As if the wiki had been installed by an earlier version of the app
+      const defines = path.join(dataDir, 'mediawiki', 'includes', 'Defines.php');
+      fs.mkdirSync(path.dirname(defines), { recursive: true });
+      fs.writeFileSync(defines, "<?php\ndefine( 'MW_VERSION', '1.43.11' );\n");
+      await close();
+      await launch();
+
+      const { DOWNLOADS } = require('../../src/versions');
+      expect(await visibleSteps()).to.deep.equal(['step3']);
+      expect(await page.isVisible('#upgradeNotice')).to.be.true;
+      expect(await page.textContent('#upgradeText')).to.include('1.43.11').and.to.include(DOWNLOADS.mediawiki.version);
+      expect(await menuItem('upgrade')).to.include({ enabled: true });
+
+      await page.click('#upgradeBtn');
+      await page.waitForSelector('#upgradeNotice', { state: 'hidden' });
+      expect(await menuItem('upgrade')).to.include({ enabled: false });
+      expect(fs.readFileSync(defines, 'utf8')).to.include(DOWNLOADS.mediawiki.version);
+      expect(await page.isEnabled('#startServersBtn')).to.be.true;
+    });
+
     it('should not keep the servers running across a restart', async function() {
       await download();
       await install();

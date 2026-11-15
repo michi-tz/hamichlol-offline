@@ -7,7 +7,7 @@ const { execFile, spawn } = require('child_process');
 const AdmZip = require('adm-zip');
 const portfinder = require('portfinder');
 const mysql = require('mysql2/promise');
-const { DOWNLOADS } = require('./versions');
+const { DOWNLOADS, MEDIAWIKI_BRANCH } = require('./versions');
 const systemTools = require('./system-tools');
 const adminValidation = require('./admin-validation');
 
@@ -104,7 +104,12 @@ function getPaths() {
     dbDataDir: path.join(dataPath, 'database'),
     mediaWikiPath,
     localSettings: path.join(mediaWikiPath, 'LocalSettings.php'),
-    runStateFile: path.join(dataPath, 'run-state.json')
+    runStateFile: path.join(dataPath, 'run-state.json'),
+    // Used while an installed wiki is upgraded (see upgradeMediaWiki)
+    mediaWikiNew: `${mediaWikiPath}.upgrade-new`,
+    mediaWikiOld: `${mediaWikiPath}.upgrade-old`,
+    dbBackup: path.join(dataPath, 'database.upgrade-backup'),
+    upgradeJournal: path.join(dataPath, 'mediawiki-upgrade.json')
   };
 }
 
@@ -157,12 +162,33 @@ function resolveDatabase() {
   return { source: null, problem: found ? `${found.exe} (${found.version || '?'}): ${found.reason}` : null };
 }
 
+// "1.46.0-rc.0" -> "1.46.0"; null when there is no version to compare.
+function numericVersion(version) {
+  const match = /^\d+\.\d+\.\d+/.exec(version || '');
+  return match ? match[0] : null;
+}
+
+// Whether `version` is older than the MediaWiki this app installs. False when
+// it is unknown: nothing is replaced or upgraded on a guess.
+function isOlderThanPinned(version) {
+  const current = numericVersion(version);
+  return Boolean(current) && systemTools.compareVersions(current, DOWNLOADS.mediawiki.version) < 0;
+}
+
 // Where MediaWiki's files come from: already in the data folder, a copy of an
 // installation found on the computer, or a download.
 function resolveMediaWiki() {
-  const { mediaWikiPath } = getPaths();
+  const { mediaWikiPath, localSettings } = getPaths();
   if (fs.existsSync(path.join(mediaWikiPath, 'index.php'))) {
-    return { source: 'installed', dir: mediaWikiPath, version: readMediaWikiVersion(mediaWikiPath) };
+    const version = readMediaWikiVersion(mediaWikiPath);
+    // Files of an older branch that hold no wiki yet (set up before the app
+    // moved to a newer MediaWiki) are simply replaced; any release of the
+    // pinned branch is fine, as for an installation found on the computer.
+    // An installed wiki is kept, and upgraded on request (upgradeMediaWiki).
+    const olderBranch = isOlderThanPinned(version) && !numericVersion(version).startsWith(`${MEDIAWIKI_BRANCH}.`);
+    if (fs.existsSync(localSettings) || !olderBranch) {
+      return { source: 'installed', dir: mediaWikiPath, version };
+    }
   }
   const found = useSystemTools() ? systemTools.findSystemMediaWiki() : null;
   if (found && found.usable) {
@@ -181,7 +207,24 @@ function resolveMediaWiki() {
       problem: `${found.dir} (${found.version}): דורש PHP ${found.minPhp} ומעלה`
     };
   }
-  return { source: 'download', dir: null, version: DOWNLOADS.mediawiki.version };
+  return {
+    source: 'download',
+    dir: null,
+    version: DOWNLOADS.mediawiki.version,
+    // Why an installation found on the computer is not used (e.g. another branch)
+    problem: found ? `${found.dir} (${found.version || '?'}): ${found.reason}` : null
+  };
+}
+
+// The upgrade an installed wiki can get: { from, to }, or null when it is up
+// to date, newer than this app's version (never downgraded) or of unknown version.
+function availableUpgrade() {
+  const { mediaWikiPath, localSettings } = getPaths();
+  if (!fs.existsSync(localSettings)) {
+    return null;
+  }
+  const from = readMediaWikiVersion(mediaWikiPath);
+  return isOlderThanPinned(from) ? { from, to: DOWNLOADS.mediawiki.version } : null;
 }
 
 function readMediaWikiVersion(dir) {
@@ -741,6 +784,8 @@ function getStatus() {
       },
       mediawiki: { source: mediawiki.source, version: mediawiki.version, path: mediawiki.dir, problem: mediawiki.problem || null }
     },
+    // An installed wiki of an older MediaWiki: { from, to }, else null
+    upgrade: availableUpgrade(),
     canDownloadServers: canDownloadServers(),
     versions: {
       php: DOWNLOADS.php.version,
@@ -1048,6 +1093,9 @@ async function downloadServers() {
     return true;
   }
 
+  // An upgrade that was cut off is finished or undone before anything else
+  await recoverInterruptedUpgrade();
+
   // Look again for installed software: it may have been added since the last check
   systemTools.resetCache();
 
@@ -1075,12 +1123,13 @@ async function downloadServers() {
     await initializeDatabase();
   }
 
-  // Only ever replace an incomplete MediaWiki folder, never an installed wiki
-  if (!fs.existsSync(path.join(mediaWikiPath, 'index.php'))) {
+  // Only ever replace an incomplete or outdated MediaWiki folder that holds no
+  // wiki; an installed wiki is upgraded by upgradeMediaWiki() instead
+  const mediawiki = resolveMediaWiki();
+  if (mediawiki.source !== 'installed') {
     if (fs.existsSync(getPaths().localSettings)) {
       throw new Error('תיקיית MediaWiki פגומה: LocalSettings.php קיים אך קבצי MediaWiki חסרים');
     }
-    const mediawiki = resolveMediaWiki();
     if (mediawiki.source === 'system') {
       console.log(`Copying installed MediaWiki ${mediawiki.version} from ${mediawiki.dir}`);
       await copyMediaWiki(mediawiki.dir, mediaWikiPath);
@@ -1229,6 +1278,9 @@ async function installMediaWiki(rawConfig) {
   const config = validateConfig(rawConfig, { commonPasswords: adminValidation.loadCommonPasswords(mediaWikiPath) });
   const { dbName, dbUser, dbPassword, wikiName, adminUser, adminPassword } = config;
 
+  // Never install over a wiki that a cut-off upgrade has moved aside
+  await recoverInterruptedUpgrade();
+
   if (fs.existsSync(localSettings)) {
     throw new Error('MediaWiki כבר מותקן (הקובץ LocalSettings.php קיים)');
   }
@@ -1292,6 +1344,10 @@ async function installMediaWiki(rawConfig) {
 
 // Start PHP and MySQL servers
 async function startServers() {
+  // Never start on a half-upgraded wiki; a crash in the middle of the swap
+  // also leaves no wiki in place until this has run
+  await recoverInterruptedUpgrade();
+
   if (!getStatus().installed) {
     throw new Error('MediaWiki עדיין לא הותקן');
   }
@@ -1413,6 +1469,373 @@ async function stopServers() {
   return true;
 }
 
+// ---------------------------------------------------------------------------
+// Upgrading an installed wiki
+//
+// When the app moves to a newer MediaWiki (DOWNLOADS.mediawiki in versions.js),
+// a wiki installed with an older one is upgraded in place: the new MediaWiki is
+// prepared next to the old one, the wiki's own files are carried over, the
+// trees are swapped by renaming, and update.php brings the database schema up
+// to date. Never the other way round: a newer wiki is never downgraded.
+//
+// What belongs to the wiki, and is kept: LocalSettings.php, the images folder
+// (uploads) and the database. Everything else in the MediaWiki folder is code
+// and comes from the new release, including the extensions and skins bundled
+// with it; the cache folder is dropped and rebuilt by MediaWiki.
+//
+// Nothing is lost if the app dies, or update.php fails, at any point: the old
+// tree stays whole (images are carried over as hard links, or copies where the
+// file system has none), and the database is copied before update.php may
+// change it. A journal (mediawiki-upgrade.json) records the phase:
+//
+//   prepare  the new tree and the database copy are being made; the wiki is
+//            untouched                      -> undo: delete them
+//   swap     mediawiki -> mediawiki.upgrade-old, mediawiki.upgrade-new -> mediawiki
+//                                           -> undo: put the old tree back
+//   update   update.php runs on the database
+//                                           -> undo: also restore the database copy
+//   cleanup  update.php succeeded           -> finish: delete the old tree and the copy
+//
+// An interrupted upgrade is finished (cleanup) or undone (any other phase) the
+// next time the app starts, and before servers are started or set up.
+// Each step of the undo can be repeated, so a crash during it is harmless.
+// ---------------------------------------------------------------------------
+
+const UPGRADE_PHASES = ['prepare', 'swap', 'update', 'cleanup'];
+// update.php reports every step; its output is far larger than execFile's 1 MB default
+const UPDATE_OUTPUT_LIMIT = 64 * 1024 * 1024;
+
+// True while this process upgrades, so its own journal is not taken for an interrupted one
+let upgrading = false;
+
+function readUpgradeJournal() {
+  const { upgradeJournal } = getPaths();
+  let journal = null;
+  try {
+    journal = JSON.parse(fs.readFileSync(upgradeJournal, 'utf8'));
+  } catch (error) {
+    if (error.code === 'ENOENT') {
+      return null;
+    }
+  }
+  if (!journal || !UPGRADE_PHASES.includes(journal.phase)) {
+    // Written atomically, so this is damage from outside: guessing the phase
+    // could pair the old code with the new database or the other way round
+    throw new Error(
+      `קובץ המצב של שדרוג MediaWiki פגום (${upgradeJournal}), ולכן לא ניתן להשלים או לבטל את השדרוג. ` +
+      'אין להפעיל את הוויקי לפני שהקבצים בתיקיית הנתונים ייבדקו'
+    );
+  }
+  return journal;
+}
+
+// Written to a temporary file, flushed to disk and renamed into place, so it
+// is never read half-written.
+async function writeUpgradeJournal(journal) {
+  const { upgradeJournal } = getPaths();
+  const temporary = `${upgradeJournal}.tmp`;
+  const fd = fs.openSync(temporary, 'w');
+  try {
+    fs.writeSync(fd, JSON.stringify(journal, null, 2));
+    fs.fsyncSync(fd);
+  } finally {
+    fs.closeSync(fd);
+  }
+  await retryWhileLocked(upgradeJournal, () => fs.renameSync(temporary, upgradeJournal));
+}
+
+async function removeUpgradeJournal() {
+  const { upgradeJournal } = getPaths();
+  await removePath(`${upgradeJournal}.tmp`);
+  await removePath(upgradeJournal);
+}
+
+function renameInPlace(from, to) {
+  return retryWhileLocked(to, () => fs.renameSync(from, to));
+}
+
+// The database folder may only be replaced while no server uses it.
+function assertDatabaseStopped() {
+  if (mysqlProcess || startingServers.has('mysql') || readRunState().mysql) {
+    throw new Error('שרת מסד הנתונים עדיין פועל, ולכן לא ניתן לשחזר את מסד הנתונים מלפני השדרוג. יש לסגור את האפליקציה ולפתוח אותה שוב');
+  }
+}
+
+// Put the database copy taken before update.php back in place.
+async function restoreDatabaseBackup() {
+  const { dbDataDir, dbBackup } = getPaths();
+  if (!fs.existsSync(dbBackup)) {
+    return; // already restored
+  }
+  assertDatabaseStopped();
+  await removePath(dbDataDir);
+  await renameInPlace(dbBackup, dbDataDir);
+}
+
+// Put the old MediaWiki tree back, wherever the swap stopped.
+async function restoreOldMediaWiki() {
+  const { mediaWikiPath, mediaWikiOld, mediaWikiNew } = getPaths();
+  if (fs.existsSync(mediaWikiOld)) {
+    // Whatever is in its place now is (part of) the new tree
+    await removePath(mediaWikiPath);
+    await renameInPlace(mediaWikiOld, mediaWikiPath);
+  }
+  await removePath(mediaWikiNew);
+  await removePath(`${mediaWikiNew}.partial`);
+}
+
+async function rollBackUpgrade(phase) {
+  const { dbBackup } = getPaths();
+  if (phase === 'update') {
+    await restoreDatabaseBackup();
+  }
+  await restoreOldMediaWiki();
+  await removePath(dbBackup);
+  await removePath(`${dbBackup}.partial`);
+  await removeUpgradeJournal();
+}
+
+async function finishUpgrade() {
+  const { mediaWikiOld, dbBackup } = getPaths();
+  await removePath(mediaWikiOld);
+  await removePath(dbBackup);
+  await removeUpgradeJournal();
+}
+
+// Finish or undo an upgrade that was cut off (the app crashed or was killed).
+// Returns null when there was none, otherwise { from, to, completed }:
+// completed is true when the upgrade had succeeded and only its clean-up was
+// left, false when the wiki was returned to `from`.
+async function recoverInterruptedUpgrade() {
+  if (upgrading || isDevMode()) {
+    return null;
+  }
+  const journal = readUpgradeJournal();
+  if (!journal) {
+    return null;
+  }
+  const { from, to, phase } = journal;
+  if (phase === 'cleanup') {
+    console.log(`Finishing the interrupted upgrade of MediaWiki ${from} to ${to}`);
+    await finishUpgrade();
+    return { from, to, completed: true };
+  }
+  console.log(`Undoing the interrupted upgrade of MediaWiki ${from} to ${to} (phase ${phase})`);
+  if (phase === 'update') {
+    // The database server the upgrade started may have outlived the app
+    await cleanupStaleProcesses();
+  }
+  await rollBackUpgrade(phase);
+  return { from, to, completed: false };
+}
+
+function checkUpgradeVersions(from, to) {
+  const current = numericVersion(from);
+  if (!current) {
+    throw new Error('לא ניתן לזהות את גרסת MediaWiki המותקנת, ולכן אי אפשר לשדרג אותה');
+  }
+  const difference = systemTools.compareVersions(current, numericVersion(to));
+  if (difference === 0) {
+    throw new Error(`MediaWiki כבר בגרסה ${from}`);
+  }
+  if (difference > 0) {
+    throw new Error(`MediaWiki המותקן (גרסה ${from}) חדש יותר מהגרסה שהאפליקציה מתקינה (${to}). שדרוג לאחור אינו נתמך`);
+  }
+}
+
+// Extensions and skins LocalSettings.php loads: wfLoadExtension( 'Name' ),
+// wfLoadSkins( [ 'A', 'B' ] ) and so on. Lines that are commented out are skipped.
+function loadedExtensions(localSettingsSource) {
+  const source = localSettingsSource.replace(/^\s*(?:#|\/\/).*$/gm, '');
+  const found = [];
+  for (const match of source.matchAll(/\bwfLoad(Extension|Skin)s?\s*\(\s*(\[[^\]]*\]|'[^']*'|"[^"]*")/g)) {
+    const folder = match[1] === 'Skin' ? 'skins' : 'extensions';
+    for (const name of match[2].matchAll(/'([^']+)'|"([^"]+)"/g)) {
+      found.push({ folder, name: name[1] || name[2] });
+    }
+  }
+  return found;
+}
+
+// Refuse a new tree the wiki cannot run on, before anything is swapped.
+function checkNewMediaWiki(newDir, from, php, localSettingsSource) {
+  const version = readMediaWikiVersion(newDir);
+  if (!numericVersion(version) || !fs.existsSync(path.join(newDir, 'maintenance', 'update.php'))) {
+    throw new Error('הקבצים שהורדו אינם התקנת MediaWiki שלמה');
+  }
+  if (systemTools.compareVersions(numericVersion(version), numericVersion(from)) <= 0) {
+    throw new Error(`הגרסה שהורדה (${version}) אינה חדשה מהגרסה המותקנת (${from}). שדרוג לאחור אינו נתמך`);
+  }
+  const minPhp = systemTools.readMediaWikiMinPhp(newDir);
+  if (minPhp && php.version && systemTools.compareVersions(php.version, minPhp) < 0) {
+    throw new Error(`MediaWiki ${version} דורש PHP ${minPhp} ומעלה, וגרסת ה-PHP שבשימוש היא ${php.version}`);
+  }
+  const missing = loadedExtensions(localSettingsSource).filter(({ folder, name }) =>
+    !fs.existsSync(path.join(newDir, folder, name, folder === 'skins' ? 'skin.json' : 'extension.json')));
+  if (missing.length > 0) {
+    throw new Error(
+      `LocalSettings.php טוען הרחבות או עיצובים שאינם כלולים ב-MediaWiki ${version}: ` +
+      `${missing.map(({ name }) => name).join(', ')}. יש להסיר את הטעינה שלהם מ-LocalSettings.php ולנסות שוב`
+    );
+  }
+  return version;
+}
+
+// Copy a folder tree with hard links where possible: no extra disk space, and
+// the original stays whole. MediaWiki never rewrites an uploaded file in
+// place, so the two trees cannot change each other.
+function linkOrCopyTree(source, target) {
+  fs.mkdirSync(target, { recursive: true });
+  for (const entry of fs.readdirSync(source, { withFileTypes: true })) {
+    const from = path.join(source, entry.name);
+    const to = path.join(target, entry.name);
+    if (entry.isDirectory()) {
+      linkOrCopyTree(from, to);
+    } else if (entry.isFile()) {
+      try {
+        fs.linkSync(from, to);
+      } catch (error) {
+        fs.copyFileSync(from, to);
+      }
+    } else {
+      fs.cpSync(from, to, { verbatimSymlinks: true });
+    }
+  }
+}
+
+// The wiki's own files, from the old tree into the new one.
+async function carryOverWikiFiles(oldDir, newDir) {
+  fs.copyFileSync(path.join(oldDir, 'LocalSettings.php'), path.join(newDir, 'LocalSettings.php'));
+  // The release's images folder holds only placeholders (README, .htaccess)
+  const images = path.join(newDir, 'images');
+  await removePath(images);
+  if (fs.existsSync(path.join(oldDir, 'images'))) {
+    linkOrCopyTree(path.join(oldDir, 'images'), images);
+  } else {
+    fs.mkdirSync(images);
+  }
+  fs.mkdirSync(path.join(newDir, 'cache'), { recursive: true });
+}
+
+async function backupDatabase() {
+  const { dbDataDir, dbBackup } = getPaths();
+  const partial = `${dbBackup}.partial`;
+  await removePath(partial);
+  await removePath(dbBackup);
+  fs.cpSync(dbDataDir, partial, { recursive: true });
+  await renameInPlace(partial, dbBackup);
+}
+
+// Run MediaWiki's schema update on the wiki's database. The database server
+// runs only for this, and is stopped again afterwards.
+async function runSchemaUpdate(php) {
+  const { mediaWikiPath } = getPaths();
+  const runner = path.join(mediaWikiPath, 'maintenance', 'run.php');
+  // maintenance/run.php exists since MediaWiki 1.40; update.php runs by itself before that
+  const script = fs.existsSync(runner) ? [runner, 'update'] : [path.join(mediaWikiPath, 'maintenance', 'update.php')];
+  await startMysql();
+  try {
+    const output = await run(php.exe, phpArgs(php, [...script, '--quick']), {
+      cwd: mediaWikiPath,
+      // LocalSettings.php takes the database port from here
+      env: { ...process.env, [DB_PORT_ENV]: String(mysqlPort) },
+      maxBuffer: UPDATE_OUTPUT_LIMIT
+    });
+    console.log(`update.php: ${output}`);
+  } catch (error) {
+    const output = `${error.stdout || ''}\n${error.stderr || ''}`;
+    const details = output.split(/\r?\n/).map(line => line.trim()).filter(Boolean).slice(-6).join('\n');
+    throw new Error(`עדכון מסד הנתונים של MediaWiki (update.php) נכשל.\n${error.code === 'ENOENT' ? 'PHP לא נמצא' : details || `קוד יציאה ${error.code}`}`);
+  } finally {
+    // A failure to stop is not swallowed: the database copy must not be put
+    // back under a running server
+    try {
+      await stopMysql();
+    } finally {
+      writeRunState();
+    }
+  }
+}
+
+// Upgrade the installed wiki to the MediaWiki version of versions.js.
+// The servers must be stopped. Throws a Hebrew message when the upgrade is
+// refused or fails; the wiki is then left as it was.
+async function upgradeMediaWiki() {
+  const paths = getPaths();
+  const to = DOWNLOADS.mediawiki.version;
+  if (!fs.existsSync(paths.localSettings)) {
+    throw new Error('MediaWiki עדיין לא הותקן');
+  }
+  const running = isDevMode() ? devServer !== null : phpProcess !== null || mysqlProcess !== null || startingServers.size > 0;
+  if (running) {
+    throw new Error('יש לעצור את השרתים לפני שדרוג MediaWiki');
+  }
+  await recoverInterruptedUpgrade();
+  const from = readMediaWikiVersion(paths.mediaWikiPath);
+  checkUpgradeVersions(from, to);
+
+  if (isDevMode()) {
+    console.log(`DEV MODE: Simulating the upgrade of MediaWiki ${from} to ${to}`);
+    fs.mkdirSync(path.join(paths.mediaWikiPath, 'includes'), { recursive: true });
+    fs.writeFileSync(path.join(paths.mediaWikiPath, 'includes', 'Defines.php'), `<?php\ndefine( 'MW_VERSION', '${to}' );\n`);
+    return true;
+  }
+
+  const php = requirePhp();
+  requireDatabase();
+  const localSettingsSource = fs.readFileSync(paths.localSettings, 'utf8');
+
+  upgrading = true;
+  let phase = 'prepare';
+  const enter = async next => {
+    phase = next;
+    await writeUpgradeJournal({ from, to, phase });
+  };
+  try {
+    try {
+      await enter('prepare');
+      console.log(`Upgrading MediaWiki ${from} to ${to}: downloading...`);
+      await downloadAndExtract(DOWNLOADS.mediawiki.urls, paths.mediaWikiNew, { stripRootFolder: true });
+      checkNewMediaWiki(paths.mediaWikiNew, from, php, localSettingsSource);
+      await carryOverWikiFiles(paths.mediaWikiPath, paths.mediaWikiNew);
+      await backupDatabase();
+
+      await enter('swap');
+      await renameInPlace(paths.mediaWikiPath, paths.mediaWikiOld);
+      await renameInPlace(paths.mediaWikiNew, paths.mediaWikiPath);
+
+      await enter('update');
+      console.log('Running update.php...');
+      await runSchemaUpdate(php);
+
+      await enter('cleanup');
+    } catch (error) {
+      console.error(`Upgrade of MediaWiki failed in phase ${phase}: ${error.message}`);
+      try {
+        await rollBackUpgrade(phase);
+        error.message += `\nהוויקי נשאר בגרסה ${from}.`;
+      } catch (rollbackError) {
+        // The journal is kept, so the next start of the app tries again
+        console.error(`Could not undo the upgrade: ${rollbackError.message}`);
+        error.message += `\nהחזרת הוויקי לגרסה ${from} לא הושלמה (${rollbackError.message}). היא תושלם בהפעלה הבאה של האפליקציה.`;
+      }
+      throw error;
+    }
+  } finally {
+    upgrading = false;
+  }
+
+  // The wiki already runs the new version; what is left is removing the old
+  // one, which the next start completes if it fails here
+  try {
+    await finishUpgrade();
+  } catch (error) {
+    console.error(`Could not remove the files of MediaWiki ${from}: ${error.message}`);
+  }
+  console.log(`MediaWiki upgraded from ${from} to ${to}`);
+  return true;
+}
+
 module.exports = {
   setDataPath,
   setFetch,
@@ -1430,6 +1853,8 @@ module.exports = {
   patchLocalSettings,
   downloadServers,
   installMediaWiki,
+  upgradeMediaWiki,
+  recoverInterruptedUpgrade,
   startServers,
   stopServers,
   // Building blocks, exported for the tests only
@@ -1440,6 +1865,7 @@ module.exports = {
     lockRetry,
     identifyProcess,
     mysqlAdminShutdown,
-    createDatabase
+    createDatabase,
+    loadedExtensions
   }
 };

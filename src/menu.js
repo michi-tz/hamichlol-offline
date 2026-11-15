@@ -7,8 +7,8 @@
 
 const APP_NAME = 'המכלול אופליין';
 
-// `state`: { installed, running, busy, wikiShown }
-// `actions`: start, stop, restart, quit, wikiHome, wikiBack, wikiForward,
+// `state`: { installed, running, busy, wikiShown, upgrade } (upgrade: { from, to } or null)
+// `actions`: start, stop, restart, upgrade, quit, wikiHome, wikiBack, wikiForward,
 //   wikiReload, wikiOpenExternal, zoomIn, zoomOut, zoomReset, toggleDevTools,
 //   about, openDataFolder
 function buildMenuTemplate(state, actions, { platform = process.platform } = {}) {
@@ -16,6 +16,7 @@ function buildMenuTemplate(state, actions, { platform = process.platform } = {})
   const canStart = Boolean(state.installed) && !state.running && !busy;
   const canStop = Boolean(state.running) && !busy;
   const wiki = Boolean(state.wikiShown);
+  const upgrade = state.upgrade || null;
   const isMac = platform === 'darwin';
 
   const template = [];
@@ -44,6 +45,13 @@ function buildMenuTemplate(state, actions, { platform = process.platform } = {})
       { id: 'start', label: 'הפעל שרתים', enabled: canStart, click: () => actions.start() },
       { id: 'stop', label: 'עצור שרתים', enabled: canStop, click: () => actions.stop() },
       { id: 'restart', label: 'הפעל מחדש', enabled: canStop, click: () => actions.restart() },
+      { type: 'separator' },
+      {
+        id: 'upgrade',
+        label: upgrade ? `שדרג את MediaWiki לגרסה ${upgrade.to}` : 'שדרג את MediaWiki',
+        enabled: Boolean(upgrade) && !busy,
+        click: () => actions.upgrade()
+      },
       ...(isMac ? [] : [
         { type: 'separator' },
         { id: 'quit', label: 'יציאה', accelerator: 'Ctrl+Q', click: () => actions.quit() }

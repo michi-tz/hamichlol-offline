@@ -451,6 +451,22 @@
 
     .ready .actions { justify-content: center; }
 
+    /* A newer MediaWiki for the installed wiki (step 3) */
+    .upgrade-notice {
+      display: flex;
+      align-items: center;
+      gap: 16px;
+      margin-top: 20px;
+      padding: 14px 16px;
+      border: 1px solid #c7d6f8;
+      border-radius: var(--radius-sm);
+      background: var(--primary-soft);
+      text-align: start;
+    }
+    .upgrade-notice[hidden] { display: none; }
+    .upgrade-notice p { flex: 1; margin: 0; font-size: 14px; }
+    .upgrade-notice .btn { flex: none; }
+
     /* Status line */
     .status {
       display: flex;
@@ -785,6 +801,13 @@
               <span>הפעל שרתים</span>
             </button>
           </div>
+          <div class="upgrade-notice" id="upgradeNotice" hidden>
+            <p id="upgradeText"></p>
+            <button type="button" class="btn btn-secondary" id="upgradeBtn">
+              <span class="spinner" aria-hidden="true"></span>
+              <span>שדרג</span>
+            </button>
+          </div>
         </div>
       </section>
 
@@ -807,6 +830,9 @@
     const installBtn = wikiSetupForm.querySelector('button[type="submit"]');
     const startServersBtn = document.getElementById('startServersBtn');
     const stopServersBtn = document.getElementById('stopServersBtn');
+    const upgradeNotice = document.getElementById('upgradeNotice');
+    const upgradeText = document.getElementById('upgradeText');
+    const upgradeBtn = document.getElementById('upgradeBtn');
     const statusEl = document.getElementById('status');
     const statusText = document.getElementById('statusText');
     const toolsList = document.getElementById('toolsList');
@@ -836,6 +862,7 @@
       start: 'שגיאה בהפעלת השרתים',
       stop: 'שגיאה בכיבוי השרתים',
       restart: 'שגיאה בהפעלה מחדש של השרתים',
+      upgrade: 'שגיאה בשדרוג MediaWiki',
       crash: 'שגיאה'
     };
 
@@ -844,14 +871,16 @@
       install: 'מתקין MediaWiki...',
       start: 'מפעיל שרתים...',
       stop: 'מכבה שרתים...',
-      restart: 'מפעיל מחדש את השרתים...'
+      restart: 'מפעיל מחדש את השרתים...',
+      upgrade: 'משדרג את MediaWiki...'
     };
 
     // Short forms for the wiki bar; the full text is in its tooltip
     const BAR_ERROR_LABELS = {
       start: 'ההפעלה נכשלה',
       stop: 'הכיבוי נכשל',
-      restart: 'ההפעלה מחדש נכשלה'
+      restart: 'ההפעלה מחדש נכשלה',
+      upgrade: 'השדרוג נכשל'
     };
 
     const busyText = busy => BUSY_MESSAGES[busy] || 'עובד...';
@@ -989,6 +1018,15 @@
       setLoading(installBtn, busy === 'install');
       setLoading(startServersBtn, busy === 'start' || busy === 'restart');
       setLoading(stopServersBtn, busy === 'stop' || busy === 'restart');
+
+      // The wiki keeps working with its version until the user upgrades it
+      upgradeNotice.hidden = !state.upgrade;
+      if (state.upgrade) {
+        upgradeText.textContent = `הוויקי מותקן עם MediaWiki ${state.upgrade.from}. אפשר לשדרג אותו לגרסה ${state.upgrade.to}, ` +
+          'זו של אתר המכלול. הדפים, הקבצים וההגדרות נשמרים, ואם השדרוג נכשל הוויקי נשאר כפי שהיה.';
+      }
+      upgradeBtn.disabled = Boolean(busy);
+      setLoading(upgradeBtn, busy === 'upgrade');
 
       showServersIndicator();
 
@@ -1141,6 +1179,7 @@
     // Step 3 and the bar: Start/Stop Servers
     startServersBtn.addEventListener('click', () => runOperation('start-servers'));
     stopServersBtn.addEventListener('click', () => runOperation('stop-servers'));
+    upgradeBtn.addEventListener('click', () => runOperation('upgrade-mediawiki'));
 
     refreshView()
       .then(checkAdminCredentials)
