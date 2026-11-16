@@ -16,7 +16,10 @@
 //
 // Extensions that add database tables need update.php: the app runs it when
 // the generated file changes (see server-manager's syncWikiSettings), and
-// records which content it ran for in SCHEMA_STAMP_FILE.
+// records which content it ran for in SCHEMA_STAMP_FILE. When that update
+// fails, the wiki is put back as it was (previousFiles / restoreFiles here, the
+// database by server-manager) and SCHEMA_FAILURE_FILE records which content
+// failed; while it is there, synchronisation with the site is blocked.
 
 const crypto = require('crypto');
 const fs = require('fs');
@@ -25,6 +28,11 @@ const path = require('path');
 const SETTINGS_FILE = 'HamichlolSettings.php';
 // Which settings file update.php last ran for, successfully
 const SCHEMA_STAMP_FILE = 'HamichlolSettings.schema.json';
+// Which settings file the update failed for, and since when the wiki runs
+// without it. In the MediaWiki folder, like the stamp: an upgrade of MediaWiki
+// that succeeds brings a new tree without it (its own update.php covered the
+// settings), and one that fails puts the old tree back with it.
+const SCHEMA_FAILURE_FILE = 'HamichlolSettings.failed.json';
 
 const INCLUDE_MARKER = '# Added by Hamichlol Offline: extensions and site settings managed by the app';
 const INCLUDE_BLOCK = [
@@ -245,6 +253,22 @@ function addInclude(localSettingsSource) {
   return `${localSettingsSource.replace(/\s*$/, '')}\n\n${INCLUDE_BLOCK}`;
 }
 
+// LocalSettings.php source without the include block addInclude() added, or
+// null when the block is there but not as the app wrote it (the user changed
+// it): the app then does not guess what to take out.
+function removeInclude(localSettingsSource) {
+  if (!localSettingsSource.includes(SETTINGS_FILE)) {
+    return localSettingsSource;
+  }
+  const at = localSettingsSource.lastIndexOf(INCLUDE_BLOCK);
+  if (at === -1 || localSettingsSource.indexOf(SETTINGS_FILE) < at ||
+      localSettingsSource.slice(at + INCLUDE_BLOCK.length).includes(SETTINGS_FILE)) {
+    return null;
+  }
+  const before = localSettingsSource.slice(0, at).replace(/\s*$/, '\n');
+  return before + localSettingsSource.slice(at + INCLUDE_BLOCK.length);
+}
+
 // Restore the executable bit of the programs the extensions run (Unix only).
 function makeProgramsExecutable(mediaWikiDir) {
   if (process.platform === 'win32') {
@@ -264,6 +288,19 @@ function makeProgramsExecutable(mediaWikiDir) {
   }
 }
 
+// Written aside and renamed, so PHP never reads half a file
+function replaceFile(file, content) {
+  fs.writeFileSync(`${file}.tmp`, content);
+  fs.renameSync(`${file}.tmp`, file);
+}
+
+// What writeSettings() would write, without writing anything:
+// { hash, schemaUpToDate }, as writeSettings() returns it.
+function planSettings(mediaWikiDir) {
+  const hash = settingsHash(buildSettings(mediaWikiDir));
+  return { hash, schemaUpToDate: readSchemaStamp(mediaWikiDir) === hash };
+}
+
 // Write the app's settings into the MediaWiki tree in `mediaWikiDir`, whose
 // LocalSettings.php must exist. Returns { hash, schemaUpToDate }: whether
 // update.php has already run for exactly this content.
@@ -272,9 +309,7 @@ function writeSettings(mediaWikiDir) {
   const localSettings = path.join(mediaWikiDir, 'LocalSettings.php');
   const content = buildSettings(mediaWikiDir);
   if (readIfExists(settingsFile) !== content) {
-    // Written aside and renamed, so PHP never reads half a file
-    fs.writeFileSync(`${settingsFile}.tmp`, content);
-    fs.renameSync(`${settingsFile}.tmp`, settingsFile);
+    replaceFile(settingsFile, content);
   }
   const source = fs.readFileSync(localSettings, 'utf8');
   const patched = addInclude(source);
@@ -284,6 +319,54 @@ function writeSettings(mediaWikiDir) {
   makeProgramsExecutable(mediaWikiDir);
   const hash = settingsHash(content);
   return { hash, schemaUpToDate: readSchemaStamp(mediaWikiDir) === hash };
+}
+
+// The files writeSettings() changes, as the wiki last ran with them, so that
+// restoreFiles() can put them back when the schema update for new settings
+// fails: { settings, stamp, localSettings }, each the file's content, or null
+// for a file that is not there.
+//
+// Without a schema stamp, update.php never succeeded for any of the app's
+// settings, so the wiki never ran with them (until it does, the app does not
+// start it on them): what it ran as is the wiki without the settings file and
+// without the line that includes it. That is a wiki installed by a version of
+// the app that had no settings file, or a fresh installation (whose
+// LocalSettings.php gets the line at installation, before the first start).
+// If the user changed that line, it is kept as it is, and so is the file.
+function previousFiles(mediaWikiDir) {
+  const local = fs.readFileSync(path.join(mediaWikiDir, 'LocalSettings.php'), 'utf8');
+  const found = {
+    settings: readIfExists(path.join(mediaWikiDir, SETTINGS_FILE)),
+    stamp: readIfExists(path.join(mediaWikiDir, SCHEMA_STAMP_FILE)),
+    localSettings: local
+  };
+  if (readSchemaStamp(mediaWikiDir) !== null) {
+    return found;
+  }
+  const withoutInclude = removeInclude(local);
+  return withoutInclude === null ? found : { ...found, settings: null, localSettings: withoutInclude };
+}
+
+// Put back the files previousFiles() described. Can be repeated.
+function restoreFiles(mediaWikiDir, previous) {
+  const localSettings = path.join(mediaWikiDir, 'LocalSettings.php');
+  // LocalSettings.php first: it must never include a settings file that is gone
+  // (rewritten in place, as writeSettings() does, so it keeps its permissions;
+  // a write cut off by a crash is simply repeated)
+  if (typeof previous.localSettings === 'string' && readIfExists(localSettings) !== previous.localSettings) {
+    fs.writeFileSync(localSettings, previous.localSettings);
+  }
+  for (const [name, content] of [[SETTINGS_FILE, previous.settings], [SCHEMA_STAMP_FILE, previous.stamp]]) {
+    const file = path.join(mediaWikiDir, name);
+    if (typeof content === 'string') {
+      if (readIfExists(file) !== content) {
+        replaceFile(file, content);
+      }
+    } else {
+      fs.rmSync(file, { force: true });
+      fs.rmSync(`${file}.tmp`, { force: true });
+    }
+  }
 }
 
 function readSchemaStamp(mediaWikiDir) {
@@ -300,9 +383,51 @@ function writeSchemaStamp(mediaWikiDir, hash) {
   fs.writeFileSync(path.join(mediaWikiDir, SCHEMA_STAMP_FILE), JSON.stringify({ settings: hash }, null, 2));
 }
 
+// The failed update: { settings, since, failedAt, error }, or null. A damaged
+// record still counts as a failure (of no particular content, so the next
+// start tries again): sync is never unblocked by damage.
+function readSchemaFailure(mediaWikiDir) {
+  const file = path.join(mediaWikiDir, SCHEMA_FAILURE_FILE);
+  let source;
+  try {
+    source = fs.readFileSync(file, 'utf8');
+  } catch (error) {
+    return null;
+  }
+  try {
+    const record = JSON.parse(source);
+    if (record && typeof record === 'object' && typeof record.settings === 'string') {
+      return record;
+    }
+  } catch (error) {
+    // damaged
+  }
+  return { settings: null, since: null, failedAt: null, error: null };
+}
+
+// Record that the update for the settings with `hash` failed with `error`
+// (a message), keeping the time of the first failure while sync stays blocked.
+function writeSchemaFailure(mediaWikiDir, hash, error, now = new Date()) {
+  const earlier = readSchemaFailure(mediaWikiDir);
+  const record = {
+    settings: hash,
+    since: (earlier && earlier.since) || now.toISOString(),
+    failedAt: now.toISOString(),
+    error
+  };
+  replaceFile(path.join(mediaWikiDir, SCHEMA_FAILURE_FILE), JSON.stringify(record, null, 2));
+}
+
+function clearSchemaFailure(mediaWikiDir) {
+  const file = path.join(mediaWikiDir, SCHEMA_FAILURE_FILE);
+  fs.rmSync(file, { force: true });
+  fs.rmSync(`${file}.tmp`, { force: true });
+}
+
 module.exports = {
   SETTINGS_FILE,
   SCHEMA_STAMP_FILE,
+  SCHEMA_FAILURE_FILE,
   INCLUDE_MARKER,
   EXTENSIONS,
   EXTRA_NAMESPACES,
@@ -312,9 +437,16 @@ module.exports = {
   availableExtensions,
   buildSettings,
   addInclude,
+  removeInclude,
   settingsHash,
   makeProgramsExecutable,
+  planSettings,
   writeSettings,
+  previousFiles,
+  restoreFiles,
   readSchemaStamp,
-  writeSchemaStamp
+  writeSchemaStamp,
+  readSchemaFailure,
+  writeSchemaFailure,
+  clearSchemaFailure
 };

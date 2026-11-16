@@ -98,6 +98,14 @@ function setupApp() {
       console.error('Failed to recover an interrupted MediaWiki upgrade:', error);
       appState.error = { action: 'upgrade', message: error.message };
     });
+    // So is an update of the app's settings: the wiki is put back as it was
+    // before it, which the page shows (with sync blocked) from the status
+    if (!appState.error) {
+      await serverManager.recoverInterruptedSettingsUpdate().catch(error => {
+        console.error('Failed to recover an interrupted update of the wiki settings:', error);
+        appState.error = { action: 'settings', message: error.message };
+      });
+    }
     // Stop servers left running by a previous run that crashed or was killed
     cleanupStaleProcesses().catch(error => console.error('Failed to clean up leftover servers:', error));
     createWindow();
@@ -278,7 +286,18 @@ const operations = {
       throw error;
     }
     return wasRunning ? serverManager.startServers() : undefined;
-  }, 'Failed to upgrade MediaWiki')
+  }, 'Failed to upgrade MediaWiki'),
+
+  // After a failed update of the app's settings the wiki runs as it was, and
+  // the update is only tried again for other settings; this tries it now. The
+  // servers are (re)started for it, since it runs before the wiki starts.
+  retrySettings: () => runOperation('retrySettings', async () => {
+    serverManager.retrySettingsUpdate();
+    if (getStatus().running) {
+      await serverManager.stopServers();
+    }
+    return serverManager.startServers();
+  }, 'Failed to update the wiki settings')
 };
 
 const menuActions = {
@@ -286,6 +305,7 @@ const menuActions = {
   stop: () => operations.stop(),
   restart: () => operations.restart(),
   upgrade: () => operations.upgrade(),
+  retrySettings: () => operations.retrySettings(),
   quit: () => app.quit(),
   wikiHome: () => wikiView.goHome(),
   wikiBack: () => wikiView.goBack(),
@@ -331,7 +351,8 @@ function updateMenu(status = getStatus()) {
       running: status.running,
       busy: appState.busy,
       wikiShown: wikiView.isShown(),
-      upgrade: status.upgrade
+      upgrade: status.upgrade,
+      syncBlocked: status.syncBlocked
     },
     menuActions
   );
@@ -360,6 +381,8 @@ ipcMain.handle('stop-servers', () => operations.stop());
 ipcMain.handle('restart-servers', () => operations.restart());
 
 ipcMain.handle('upgrade-mediawiki', () => operations.upgrade());
+
+ipcMain.handle('retry-settings-update', () => operations.retrySettings());
 
 // Live feedback on the administrator's name and password, by the same rules
 // the installation applies

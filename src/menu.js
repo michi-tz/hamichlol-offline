@@ -7,16 +7,18 @@
 
 const APP_NAME = 'המכלול אופליין';
 
-// `state`: { installed, running, busy, wikiShown, upgrade } (upgrade: { from, to } or null)
-// `actions`: start, stop, restart, upgrade, quit, wikiHome, wikiBack, wikiForward,
-//   wikiReload, wikiOpenExternal, zoomIn, zoomOut, zoomReset, toggleDevTools,
-//   about, openDataFolder
+// `state`: { installed, running, busy, wikiShown, upgrade, syncBlocked }
+//   (upgrade: { from, to } or null; syncBlocked: getStatus().syncBlocked)
+// `actions`: start, stop, restart, upgrade, retrySettings, quit, wikiHome,
+//   wikiBack, wikiForward, wikiReload, wikiOpenExternal, zoomIn, zoomOut,
+//   zoomReset, toggleDevTools, about, openDataFolder
 function buildMenuTemplate(state, actions, { platform = process.platform } = {}) {
   const busy = Boolean(state.busy);
   const canStart = Boolean(state.installed) && !state.running && !busy;
   const canStop = Boolean(state.running) && !busy;
   const wiki = Boolean(state.wikiShown);
   const upgrade = state.upgrade || null;
+  const failedSettingsUpdate = Boolean(state.syncBlocked) && state.syncBlocked.reason === 'settings-update-failed';
   const isMac = platform === 'darwin';
 
   const template = [];
@@ -52,6 +54,14 @@ function buildMenuTemplate(state, actions, { platform = process.platform } = {})
         enabled: Boolean(upgrade) && !busy,
         click: () => actions.upgrade()
       },
+      // Only after the update of the app's settings failed (not while it is
+      // still to be undone: the next start does that)
+      ...(failedSettingsUpdate ? [{
+        id: 'retrySettings',
+        label: 'נסה שוב לעדכן את הגדרות הוויקי',
+        enabled: Boolean(state.installed) && !busy,
+        click: () => actions.retrySettings()
+      }] : []),
       ...(isMac ? [] : [
         { type: 'separator' },
         { id: 'quit', label: 'יציאה', accelerator: 'Ctrl+Q', click: () => actions.quit() }

@@ -306,6 +306,74 @@ describe('Real installed software', function() {
     await stopServers();
   });
 
+  // The update.php that runs when the app's settings change fails half-way:
+  // the wiki starts on the database copied before it, with sync blocked
+  it('should start the wiki as it was when the update of changed settings fails', async function() {
+    const { mediaWikiPath, localSettings } = getPaths();
+    const wikiSettings = require('../../src/wiki-settings');
+    // An update that changes the database (a table, made by MediaWiki's own
+    // updater), then fails on SQL an extension got wrong; only when asked to,
+    // so the retry below succeeds
+    const marker = path.join(dataDir, 'marker.sql');
+    const broken = path.join(dataDir, 'broken.sql');
+    fs.writeFileSync(marker, 'CREATE TABLE /*_*/hamichlol_test_marker ( id INT );\n');
+    fs.writeFileSync(broken, 'CREATE TABLE /*_*/hamichlol_test_broken ( this is not sql );\n');
+    const ownSettings = [
+      '',
+      "$wgHooks['LoadExtensionSchemaUpdates'][] = static function ( $updater ) {",
+      `\t$updater->addExtensionTable( 'hamichlol_test_marker', ${JSON.stringify(marker)} );`,
+      "\tif ( getenv( 'HAMICHLOL_TEST_FAIL_UPDATE' ) ) {",
+      `\t\t$updater->addExtensionTable( 'hamichlol_test_broken', ${JSON.stringify(broken)} );`,
+      '\t}',
+      '};',
+      ''
+    ].join('\n');
+    fs.appendFileSync(localSettings, ownSettings);
+    // As if a newer app had changed the settings since the last update
+    fs.writeFileSync(path.join(mediaWikiPath, wikiSettings.SCHEMA_STAMP_FILE), JSON.stringify({ settings: 'older' }));
+    const hasMarker = async () => {
+      const connection = await require('mysql2/promise').createConnection({ host: '127.0.0.1', port: ports.mysqlPort, user: 'root' });
+      try {
+        const [rows] = await connection.query(`SHOW TABLES FROM \`${CONFIG.dbName}\` LIKE 'mw_hamichlol_test_marker'`);
+        return rows.length > 0;
+      } finally {
+        await connection.end();
+      }
+    };
+
+    const restore = setEnv({ HAMICHLOL_TEST_FAIL_UPDATE: '1' });
+    try {
+      ports = await startServers();
+    } finally {
+      restore();
+    }
+
+    try {
+      const { syncBlocked } = getStatus();
+      expect(syncBlocked).to.include({ reason: 'settings-update-failed' });
+      expect(syncBlocked.details, syncBlocked.details).to.include('hamichlol_test_broken');
+      expect(await hasMarker(), 'the table the failed update made').to.be.false;
+      expect(JSON.parse(fs.readFileSync(path.join(mediaWikiPath, wikiSettings.SCHEMA_STAMP_FILE), 'utf8')).settings).to.equal('older');
+      const { query } = await api('action=query&meta=siteinfo&siprop=statistics|general');
+      expect(query.general.sitename).to.equal(CONFIG.wikiName);
+      expect(query.statistics.pages).to.be.at.least(1);
+      expect(fs.readdirSync(dataDir).filter(name => /settings/.test(name))).to.deep.equal([]);
+    } finally {
+      await stopServers();
+    }
+
+    // Tried again when asked, and it succeeds
+    serverManager.retrySettingsUpdate();
+    ports = await startServers();
+    try {
+      expect(getStatus().syncBlocked).to.be.null;
+      expect(await hasMarker()).to.be.true;
+    } finally {
+      await stopServers();
+      fs.writeFileSync(localSettings, fs.readFileSync(localSettings, 'utf8').replace(ownSettings, ''));
+    }
+  });
+
   it('should refuse to install a second time', async function() {
     const error = await installMediaWiki(CONFIG).then(() => null, failure => failure);
 

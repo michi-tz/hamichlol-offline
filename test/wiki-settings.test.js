@@ -200,6 +200,16 @@ describe('App-managed wiki settings', function() {
       expect(writeSettings(mw).schemaUpToDate).to.be.false;
     });
 
+    it('should tell what it would write without writing anything', function() {
+      tree(['Cite']);
+
+      const plan = wikiSettings.planSettings(mw);
+
+      expect(fs.existsSync(path.join(mw, SETTINGS_FILE))).to.be.false;
+      expect(localSettings()).to.equal(INSTALLED_SETTINGS);
+      expect(plan).to.deep.equal(writeSettings(mw));
+    });
+
     it('should make the programs the extensions run executable again', function() {
       if (process.platform === 'win32') {
         this.skip(); // no executable bit
@@ -214,6 +224,88 @@ describe('App-managed wiki settings', function() {
       writeSettings(mw);
 
       expect(fs.statSync(lua).mode & 0o777).to.equal(0o755);
+    });
+  });
+
+  // What a failed schema update puts back (server-manager's syncWikiSettings)
+  describe('Going back after a failed update', function() {
+    const { removeInclude, previousFiles, restoreFiles, readSchemaFailure, writeSchemaFailure, clearSchemaFailure, SCHEMA_FAILURE_FILE } = wikiSettings;
+    const exists = name => fs.existsSync(path.join(mw, name));
+
+    it('should take out exactly the include block it added', function() {
+      const included = addInclude(INSTALLED_SETTINGS);
+      expect(removeInclude(included)).to.equal(INSTALLED_SETTINGS);
+      // With the user's own settings after it
+      expect(removeInclude(`${included}$wgDefaultSkin = 'timeless';\n`)).to.equal(`${INSTALLED_SETTINGS}$wgDefaultSkin = 'timeless';\n`);
+      // Nothing to take out
+      expect(removeInclude(INSTALLED_SETTINGS)).to.equal(INSTALLED_SETTINGS);
+      // Changed by the user: not guessed at
+      expect(removeInclude(included.replace('require_once', '# require_once'))).to.be.null;
+      expect(removeInclude(`${included}require_once "$IP/${SETTINGS_FILE}";\n`)).to.be.null;
+    });
+
+    it('should go back to the previous settings once an update has succeeded for them', function() {
+      tree(['Cite']);
+      writeSchemaStamp(mw, writeSettings(mw).hash);
+      const before = { local: localSettings(), settings: settingsFile(), stamp: fs.readFileSync(path.join(mw, SCHEMA_STAMP_FILE), 'utf8') };
+      const previous = previousFiles(mw);
+
+      tree(['Cite', 'Scribunto']);
+      writeSchemaStamp(mw, writeSettings(mw).hash);
+      restoreFiles(mw, previous);
+
+      expect(localSettings()).to.equal(before.local);
+      expect(settingsFile()).to.equal(before.settings);
+      expect(fs.readFileSync(path.join(mw, SCHEMA_STAMP_FILE), 'utf8')).to.equal(before.stamp);
+    });
+
+    it('should go back to the wiki without the app\'s settings when no update ever succeeded', function() {
+      tree(['Cite']);
+      // As installMediaWiki leaves it
+      writeSettings(mw);
+      const previous = previousFiles(mw);
+
+      writeSchemaStamp(mw, writeSettings(mw).hash);
+      restoreFiles(mw, previous);
+      restoreFiles(mw, previous); // can be repeated
+
+      expect(localSettings()).to.equal(INSTALLED_SETTINGS);
+      expect(exists(SETTINGS_FILE)).to.be.false;
+      expect(exists(SCHEMA_STAMP_FILE)).to.be.false;
+    });
+
+    it('should keep an include line the user changed, and the file it may include', function() {
+      tree(['Cite']);
+      writeSettings(mw);
+      const edited = localSettings().replace('require_once', '# require_once');
+      fs.writeFileSync(path.join(mw, 'LocalSettings.php'), edited);
+      const previous = previousFiles(mw);
+
+      restoreFiles(mw, previous);
+
+      expect(localSettings()).to.equal(edited);
+      expect(exists(SETTINGS_FILE)).to.be.true;
+    });
+
+    it('should record a failure, keeping the time sync has been blocked since', function() {
+      tree([]);
+      expect(readSchemaFailure(mw)).to.be.null;
+
+      writeSchemaFailure(mw, 'aaa', 'first', new Date('2026-11-01T10:00:00Z'));
+      writeSchemaFailure(mw, 'bbb', 'second', new Date('2026-11-05T10:00:00Z'));
+
+      expect(readSchemaFailure(mw)).to.deep.equal({
+        settings: 'bbb', since: '2026-11-01T10:00:00.000Z', failedAt: '2026-11-05T10:00:00.000Z', error: 'second'
+      });
+      clearSchemaFailure(mw);
+      expect(readSchemaFailure(mw)).to.be.null;
+    });
+
+    it('should take a damaged failure record as a failure of no particular settings', function() {
+      tree([]);
+      fs.writeFileSync(path.join(mw, SCHEMA_FAILURE_FILE), '{"settings": ');
+
+      expect(readSchemaFailure(mw)).to.include({ settings: null });
     });
   });
 });

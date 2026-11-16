@@ -110,7 +110,10 @@ function getPaths() {
     mediaWikiNew: `${mediaWikiPath}.upgrade-new`,
     mediaWikiOld: `${mediaWikiPath}.upgrade-old`,
     dbBackup: path.join(dataPath, 'database.upgrade-backup'),
-    upgradeJournal: path.join(dataPath, 'mediawiki-upgrade.json')
+    upgradeJournal: path.join(dataPath, 'mediawiki-upgrade.json'),
+    // Used while the schema update for new app settings runs (see syncWikiSettings)
+    settingsDbBackup: path.join(dataPath, 'database.settings-backup'),
+    settingsJournal: path.join(dataPath, 'wiki-settings-update.json')
   };
 }
 
@@ -486,6 +489,21 @@ async function readCommandLine(pid) {
   return run('ps', ['-ww', '-o', 'command=', '-p', String(pid)]);
 }
 
+// Whether `pid` has exited and only waits to be reaped (Linux; false elsewhere
+// or when it cannot be told).
+function isZombie(pid) {
+  if (process.platform !== 'linux') {
+    return false;
+  }
+  try {
+    // "pid (name) state ...": the name may hold spaces and parentheses
+    const stat = fs.readFileSync(`/proc/${pid}/stat`, 'utf8');
+    return /^[ZX]/.test(stat.slice(stat.lastIndexOf(')') + 2));
+  } catch (error) {
+    return error.code === 'ENOENT';
+  }
+}
+
 // Whether the process saved in a run-state entry is still this app's server:
 // 'ours'    - alive, and its command line has the program and our marker
 // 'gone'    - exited, or the PID now belongs to some other process
@@ -506,6 +524,20 @@ async function identifyProcess(entry) {
   let commandLine;
   try {
     commandLine = await readCommandLine(pid);
+    // Linux shows an empty command line for a process that has exited but is
+    // not reaped yet (a zombie: gone), and also, for a moment, for one in the
+    // middle of starting a program (alive): read it again rather than take
+    // the second for the first
+    for (let attempt = 0; process.platform === 'linux' && !commandLine.trim() && attempt < 20; attempt++) {
+      if (isZombie(pid)) {
+        return 'gone';
+      }
+      await delay(10);
+      commandLine = await readCommandLine(pid);
+    }
+    if (!commandLine.trim()) {
+      return isZombie(pid) ? 'gone' : 'unknown';
+    }
   } catch (error) {
     // The process may have exited between the two checks
     try {
@@ -787,6 +819,10 @@ function getStatus() {
     },
     // An installed wiki of an older MediaWiki: { from, to }, else null
     upgrade: availableUpgrade(),
+    // Why synchronisation with the site must not run now: { reason, since,
+    // message, details }, else null. The sync features check it before they
+    // import, update or upload anything.
+    syncBlocked: syncBlock(),
     canDownloadServers: canDownloadServers(),
     versions: {
       php: DOWNLOADS.php.version,
@@ -1281,6 +1317,7 @@ async function installMediaWiki(rawConfig) {
 
   // Never install over a wiki that a cut-off upgrade has moved aside
   await recoverInterruptedUpgrade();
+  await recoverInterruptedSettingsUpdate();
 
   if (fs.existsSync(localSettings)) {
     throw new Error('MediaWiki כבר מותקן (הקובץ LocalSettings.php קיים)');
@@ -1348,8 +1385,10 @@ async function installMediaWiki(rawConfig) {
 // Start PHP and MySQL servers
 async function startServers() {
   // Never start on a half-upgraded wiki; a crash in the middle of the swap
-  // also leaves no wiki in place until this has run
+  // also leaves no wiki in place until this has run. Nor on settings whose
+  // schema update was cut off, or whose restore did not finish.
   await recoverInterruptedUpgrade();
+  await recoverInterruptedSettingsUpdate();
 
   if (!getStatus().installed) {
     throw new Error('MediaWiki עדיין לא הותקן');
@@ -1396,12 +1435,12 @@ async function startServers() {
     return { phpPort, mysqlPort };
   }
 
-  // The database first, whatever else is due: a problem with it is reported
-  // as such, and the schema update below runs on this same server
   const mysqlWasRunning = mysqlProcess !== null;
-  await startMysql();
   try {
-    // Until the schema update has succeeded, PHP (the wiki) is not started
+    // Starts the database server: first, whatever else is due, so a problem
+    // with it is reported as such; the schema update runs on this same server.
+    // PHP (the wiki) only starts once the database matches the settings: the
+    // new ones after a successful update, the previous ones after a failed one.
     await syncWikiSettings();
     await startPhp();
   } catch (error) {
@@ -1515,21 +1554,23 @@ const UPDATE_OUTPUT_LIMIT = 64 * 1024 * 1024;
 // True while this process upgrades, so its own journal is not taken for an interrupted one
 let upgrading = false;
 
-function readUpgradeJournal() {
-  const { upgradeJournal } = getPaths();
+// The journal in `file` (the upgrade's, or the settings update's: see
+// syncWikiSettings), or null when there is none. `what` names the operation in
+// the message about a damaged one.
+function readJournal(file, phases, what) {
   let journal = null;
   try {
-    journal = JSON.parse(fs.readFileSync(upgradeJournal, 'utf8'));
+    journal = JSON.parse(fs.readFileSync(file, 'utf8'));
   } catch (error) {
     if (error.code === 'ENOENT') {
       return null;
     }
   }
-  if (!journal || !UPGRADE_PHASES.includes(journal.phase)) {
+  if (!journal || !phases.includes(journal.phase)) {
     // Written atomically, so this is damage from outside: guessing the phase
     // could pair the old code with the new database or the other way round
     throw new Error(
-      `קובץ המצב של שדרוג MediaWiki פגום (${upgradeJournal}), ולכן לא ניתן להשלים או לבטל את השדרוג. ` +
+      `קובץ המצב של ${what} פגום (${file}), ולכן לא ניתן להשלים או לבטל את ${what}. ` +
       'אין להפעיל את הוויקי לפני שהקבצים בתיקיית הנתונים ייבדקו'
     );
   }
@@ -1538,9 +1579,8 @@ function readUpgradeJournal() {
 
 // Written to a temporary file, flushed to disk and renamed into place, so it
 // is never read half-written.
-async function writeUpgradeJournal(journal) {
-  const { upgradeJournal } = getPaths();
-  const temporary = `${upgradeJournal}.tmp`;
+async function writeJournal(file, journal) {
+  const temporary = `${file}.tmp`;
   const fd = fs.openSync(temporary, 'w');
   try {
     fs.writeSync(fd, JSON.stringify(journal, null, 2));
@@ -1548,35 +1588,58 @@ async function writeUpgradeJournal(journal) {
   } finally {
     fs.closeSync(fd);
   }
-  await retryWhileLocked(upgradeJournal, () => fs.renameSync(temporary, upgradeJournal));
+  await retryWhileLocked(file, () => fs.renameSync(temporary, file));
 }
 
-async function removeUpgradeJournal() {
-  const { upgradeJournal } = getPaths();
-  await removePath(`${upgradeJournal}.tmp`);
-  await removePath(upgradeJournal);
+async function removeJournal(file) {
+  await removePath(`${file}.tmp`);
+  await removePath(file);
+}
+
+function readUpgradeJournal() {
+  return readJournal(getPaths().upgradeJournal, UPGRADE_PHASES, 'שדרוג MediaWiki');
+}
+
+function writeUpgradeJournal(journal) {
+  return writeJournal(getPaths().upgradeJournal, journal);
+}
+
+function removeUpgradeJournal() {
+  return removeJournal(getPaths().upgradeJournal);
 }
 
 function renameInPlace(from, to) {
   return retryWhileLocked(to, () => fs.renameSync(from, to));
 }
 
-// The database folder may only be replaced while no server uses it.
-function assertDatabaseStopped() {
+// The database folder may only be replaced while no server uses it. `before`
+// says which copy, e.g. 'מלפני השדרוג'.
+function assertDatabaseStopped(before) {
   if (mysqlProcess || startingServers.has('mysql') || readRunState().mysql) {
-    throw new Error('שרת מסד הנתונים עדיין פועל, ולכן לא ניתן לשחזר את מסד הנתונים מלפני השדרוג. יש לסגור את האפליקציה ולפתוח אותה שוב');
+    throw new Error(`שרת מסד הנתונים עדיין פועל, ולכן לא ניתן לשחזר את מסד הנתונים ${before}. יש לסגור את האפליקציה ולפתוח אותה שוב`);
   }
 }
 
-// Put the database copy taken before update.php back in place.
-async function restoreDatabaseBackup() {
-  const { dbDataDir, dbBackup } = getPaths();
-  if (!fs.existsSync(dbBackup)) {
+// Put a database copy taken by backupDatabase() back in place.
+async function restoreDatabaseBackup(backup = getPaths().dbBackup, before = 'מלפני השדרוג') {
+  const { dbDataDir } = getPaths();
+  if (!fs.existsSync(backup)) {
     return; // already restored
   }
-  assertDatabaseStopped();
+  assertDatabaseStopped(before);
   await removePath(dbDataDir);
-  await renameInPlace(dbBackup, dbDataDir);
+  await renameInPlace(backup, dbDataDir);
+}
+
+// Stop a database server a crashed earlier run left behind: it would keep
+// changing the files a copy is taken of. The app starts this clean-up without
+// waiting for it, so it is done (again) before anything is copied. `refusal`
+// says what cannot be done while it runs.
+async function stopLeftoverDatabase(refusal) {
+  await cleanupStaleProcesses();
+  if (readRunState().mysql) {
+    throw new Error(`שרת מסד נתונים מהפעלה קודמת של האפליקציה עדיין פועל ולא ניתן לעצור אותו, ולכן ${refusal}. יש לסגור את האפליקציה ולפתוח אותה שוב`);
+  }
 }
 
 // Put the old MediaWiki tree back, wherever the swap stopped.
@@ -1724,13 +1787,15 @@ async function carryOverWikiFiles(oldDir, newDir) {
   fs.mkdirSync(path.join(newDir, 'cache'), { recursive: true });
 }
 
-async function backupDatabase() {
-  const { dbDataDir, dbBackup } = getPaths();
-  const partial = `${dbBackup}.partial`;
+// Copy the database folder to `backup` (no server may be using it). Made under
+// a temporary name, so an interrupted copy is never taken for a whole one.
+async function backupDatabase(backup = getPaths().dbBackup) {
+  const { dbDataDir } = getPaths();
+  const partial = `${backup}.partial`;
   await removePath(partial);
-  await removePath(dbBackup);
+  await removePath(backup);
   fs.cpSync(dbDataDir, partial, { recursive: true });
-  await renameInPlace(partial, dbBackup);
+  await renameInPlace(partial, backup);
 }
 
 // Run MediaWiki's schema update on the wiki's database. The database server
@@ -1752,7 +1817,10 @@ async function runSchemaUpdate(php) {
     console.log(`update.php: ${output}`);
   } catch (error) {
     const output = `${error.stdout || ''}\n${error.stderr || ''}`;
-    const details = output.split(/\r?\n/).map(line => line.trim()).filter(Boolean).slice(-6).join('\n');
+    // The end of its output, without the backtrace of an exception, which
+    // would push out the message itself
+    const details = output.split(/\r?\n/).map(line => line.trim()).filter(Boolean)
+      .filter(line => !/^(#\d+ |Backtrace:$)/.test(line)).slice(-6).join('\n');
     throw new Error(`עדכון מסד הנתונים של MediaWiki (update.php) נכשל.\n${error.code === 'ENOENT' ? 'PHP לא נמצא' : details || `קוד יציאה ${error.code}`}`);
   } finally {
     // A failure to stop is not swallowed: the database copy must not be put
@@ -1767,21 +1835,276 @@ async function runSchemaUpdate(php) {
   }
 }
 
-// Bring the app's settings file (wiki-settings.js) of the installed wiki up
-// to date, and run the schema update when its content changed since the last
-// successful one: an extension the app enables may add tables. update.php is
-// idempotent, so a run that failed or was cut off is simply repeated on the
-// next start; until it succeeds the wiki is not started. Called by
-// startServers with the database server already running, which it leaves running.
+// ---------------------------------------------------------------------------
+// Updating the app's settings of an installed wiki
+//
+// The app's settings file (wiki-settings.js) is brought up to date at every
+// start. When its content changed since the last successful schema update (in
+// practice: a new version of the app or of MediaWiki), update.php runs, since
+// an extension the app enables may add tables.
+//
+// If that update fails, the wiki is not left unusable: it is put back as it
+// was before the attempt - the database, the previous settings file and its
+// schema stamp, and LocalSettings.php - and started like that. The failure is
+// recorded (wiki-settings' SCHEMA_FAILURE_FILE), and while it is,
+// synchronisation with the site is blocked (getStatus().syncBlocked): the
+// sync features expect the wiki to run with the app's current settings.
+//
+// To be able to go back, the database is copied (database.settings-backup)
+// while no server uses it, before the database server is started, and the
+// previous files are kept in a journal (wiki-settings-update.json), written
+// like the upgrade's. Its phases:
+//
+//   prepare  the database is being copied; nothing is changed yet
+//                                       -> undo: delete the copy
+//   update   the new settings are written and update.php runs
+//                                       -> undo: restore the database copy and
+//                                          the previous files, record a failure
+//   restore  update.php failed (the journal holds its error) -> undo, the same
+//   cleanup  the update succeeded       -> finish: delete the copy, clear the
+//                                          recorded failure
+//
+// An update cut off by a crash is undone (or finished) the next time servers
+// are started, set up or upgraded, and when the app starts. An update cut off
+// by a crash counts as failed, so it is not tried again on its own each time
+// the app is opened (see below). Each step can be repeated.
+//
+// When it is tried again: only for settings whose content differs from the one
+// that failed (a new version of the app or of MediaWiki), or when the user
+// asks for it (retrySettingsUpdate). An update that fails the same way every
+// time would otherwise cost a copy of the database and a failed run at every
+// start.
+// ---------------------------------------------------------------------------
+
+const SETTINGS_PHASES = ['prepare', 'update', 'restore', 'cleanup'];
+
+// True while this process updates the settings, so its own journal is not
+// taken for an interrupted one
+let updatingSettings = false;
+
+const SETTINGS_UPDATE_FAILED = 'עדכון ההגדרות וההרחבות של הוויקי (update.php) נכשל, והוויקי הוחזר למצבו הקודם. ' +
+  'הסנכרון עם אתר המכלול חסום עד שהעדכון יצליח';
+const SETTINGS_UPDATE_UNFINISHED = 'עדכון ההגדרות של הוויקי לא הושלם, והוויקי לא יופעל עד שיוחזר למצבו הקודם. ' +
+  'הסנכרון עם אתר המכלול חסום עד שהעדכון יצליח';
+const SETTINGS_UPDATE_INTERRUPTED = 'העדכון הופסק באמצע: האפליקציה נסגרה או קרסה בזמן שרץ';
+
+function readSettingsJournal() {
+  return readJournal(getPaths().settingsJournal, SETTINGS_PHASES, 'עדכון ההגדרות של הוויקי');
+}
+
+// What getStatus() reports as syncBlocked.
+function syncBlock() {
+  const { mediaWikiPath, localSettings, settingsJournal } = getPaths();
+  if (!fs.existsSync(localSettings) && !fs.existsSync(settingsJournal)) {
+    return null;
+  }
+  if (fs.existsSync(settingsJournal)) {
+    // Under way, or cut off and not yet undone
+    return { reason: 'settings-update-unfinished', since: null, message: SETTINGS_UPDATE_UNFINISHED, details: null };
+  }
+  const failure = wikiSettings.readSchemaFailure(mediaWikiPath);
+  if (!failure) {
+    return null;
+  }
+  return {
+    reason: 'settings-update-failed',
+    since: failure.since || null,
+    message: SETTINGS_UPDATE_FAILED,
+    details: failure.error || null
+  };
+}
+
+// Put the wiki back as the journal recorded it, and record the failure
+// (`error`, a message) unless there is none to record (a copy cut off before
+// anything was changed). Then remove the copy and the journal.
+async function rollBackSettingsUpdate(journal, error) {
+  const { mediaWikiPath, settingsDbBackup, settingsJournal } = getPaths();
+  if (journal.phase !== 'prepare') {
+    // The database first: until it is back, the journal (and so the next
+    // start) still knows the files have to follow
+    await restoreDatabaseBackup(settingsDbBackup, 'מלפני עדכון ההגדרות');
+    wikiSettings.restoreFiles(mediaWikiPath, journal.previous);
+  }
+  if (error) {
+    wikiSettings.writeSchemaFailure(mediaWikiPath, journal.settings, error);
+  }
+  await removePath(settingsDbBackup);
+  await removePath(`${settingsDbBackup}.partial`);
+  await removeJournal(settingsJournal);
+}
+
+async function finishSettingsUpdate() {
+  const { mediaWikiPath, settingsDbBackup, settingsJournal } = getPaths();
+  await removePath(settingsDbBackup);
+  wikiSettings.clearSchemaFailure(mediaWikiPath);
+  await removeJournal(settingsJournal);
+}
+
+// Finish or undo an update of the settings that was cut off (the app crashed
+// or was killed, or its restore failed). Returns null when there was none,
+// otherwise { completed }: true when the update had succeeded and only its
+// clean-up was left, false when the wiki was returned to its previous state.
+async function recoverInterruptedSettingsUpdate() {
+  if (updatingSettings || isDevMode()) {
+    return null;
+  }
+  const journal = readSettingsJournal();
+  if (!journal) {
+    return null;
+  }
+  if (journal.phase === 'cleanup') {
+    console.log('Finishing the interrupted update of the wiki settings');
+    await finishSettingsUpdate();
+    return { completed: true };
+  }
+  console.log(`Undoing the interrupted update of the wiki settings (phase ${journal.phase})`);
+  if (journal.phase !== 'prepare') {
+    // The database server of the update: left by a crashed run, or still
+    // running in this one after its restore failed
+    if (mysqlProcess && !phpProcess) {
+      await stopMysql();
+      writeRunState();
+    }
+    await cleanupStaleProcesses();
+  }
+  const error = journal.phase === 'restore' ? journal.error || SETTINGS_UPDATE_INTERRUPTED
+    : journal.phase === 'update' ? SETTINGS_UPDATE_INTERRUPTED : null;
+  await rollBackSettingsUpdate(journal, error);
+  return { completed: false };
+}
+
+// Let the next start try the update again, also for settings whose update
+// already failed. Changes nothing else; the wiki keeps running meanwhile.
+function retrySettingsUpdate() {
+  const { mediaWikiPath, localSettings } = getPaths();
+  if (!fs.existsSync(localSettings)) {
+    throw new Error('MediaWiki עדיין לא הותקן');
+  }
+  wikiSettings.clearSchemaFailure(mediaWikiPath);
+}
+
+// Bring the app's settings of the installed wiki up to date, and start the
+// database server (startServers then starts PHP). Throws only when the wiki
+// must not be started: the database server cannot start, PHP is missing, or a
+// failed update could not be undone.
 async function syncWikiSettings() {
   const { mediaWikiPath } = getPaths();
-  const { hash, schemaUpToDate } = wikiSettings.writeSettings(mediaWikiPath);
+  const { hash, schemaUpToDate } = wikiSettings.planSettings(mediaWikiPath);
+  const failure = wikiSettings.readSchemaFailure(mediaWikiPath);
+
   if (schemaUpToDate) {
+    // E.g. a failure of other settings, and the app went back to these
+    wikiSettings.clearSchemaFailure(mediaWikiPath);
+  }
+  if (schemaUpToDate || (failure && failure.settings === hash)) {
+    await startMysql();
+    if (schemaUpToDate) {
+      wikiSettings.writeSettings(mediaWikiPath);
+    } else {
+      // The wiki keeps running as it was put back after the failure
+      console.log('The update of the wiki settings failed before for these settings; not trying again');
+    }
     return;
   }
-  console.log('The extensions or settings changed: running update.php...');
-  await runSchemaUpdate(requirePhp());
-  wikiSettings.writeSchemaStamp(mediaWikiPath, hash);
+
+  // Missing programs are reported as such, not as a failed update; the
+  // database server first (PHP is looked for once it runs, below)
+  requireDatabase();
+  // Nothing may write to the database while it is copied
+  if (mysqlProcess) {
+    await stopMysql();
+    writeRunState();
+  }
+  await stopLeftoverDatabase('לא ניתן לעדכן את הגדרות הוויקי');
+
+  const { settingsDbBackup, settingsJournal } = getPaths();
+  let journal = { settings: hash, phase: null, previous: wikiSettings.previousFiles(mediaWikiPath) };
+  // The phase advances only once its journal is on disk: a failed write is
+  // undone as the phase before it, which is what the journal still says
+  const enter = async (phase, extra = {}) => {
+    const next = { ...journal, ...extra, phase };
+    await writeJournal(settingsJournal, next);
+    journal = next;
+  };
+
+  updatingSettings = true;
+  try {
+    try {
+      await enter('prepare');
+      console.log('The extensions or settings changed: copying the database before update.php...');
+      await backupDatabase(settingsDbBackup);
+    } catch (error) {
+      // Nothing was changed: the wiki starts as it was, without the new settings
+      console.error(`Could not prepare the update of the wiki settings: ${error.message}`);
+      if (journal.phase === null) {
+        wikiSettings.writeSchemaFailure(mediaWikiPath, hash, error.message);
+      } else {
+        await rollBackSettingsUpdate(journal, error.message);
+      }
+      await startMysql();
+      return;
+    }
+
+    let php;
+    try {
+      await startMysql();
+      php = requirePhp();
+    } catch (error) {
+      // The wiki cannot start at all; that is not a failure of the update
+      await rollBackSettingsUpdate(journal, null).catch(cleanupError =>
+        console.error(`Could not remove the database copy: ${cleanupError.message}`));
+      throw error;
+    }
+
+    try {
+      await enter('update');
+      wikiSettings.writeSettings(mediaWikiPath);
+      console.log('Running update.php...');
+      await runSchemaUpdate(php);
+      wikiSettings.writeSchemaStamp(mediaWikiPath, hash);
+      await enter('cleanup');
+    } catch (error) {
+      console.error(`The update of the wiki settings failed in phase ${journal.phase}: ${error.message}`);
+      await restoreAfterFailedUpdate(journal, error, enter);
+      // The wiki starts as it was before the update
+      await startMysql();
+      return;
+    }
+  } finally {
+    updatingSettings = false;
+  }
+
+  // The wiki runs on the new settings; what is left is removing the copy,
+  // which the next start completes if it fails here
+  try {
+    await finishSettingsUpdate();
+  } catch (error) {
+    console.error(`Could not remove the copy of the database: ${error.message}`);
+  }
+  console.log('The wiki settings are up to date');
+}
+
+// Undo a failed update: stop the database server, put back the copy and the
+// previous files, and record the failure. Throws, with the update's error and
+// why the restore did not finish, when the wiki is not back in one piece; the
+// journal is then kept, so the next start finishes the restore.
+async function restoreAfterFailedUpdate(journal, error, enter) {
+  try {
+    if (journal.phase === 'update') {
+      // So that a restore cut off by a crash still records this error
+      await enter('restore', { error: error.message }).catch(journalError =>
+        console.error(`Could not record the failure in the journal: ${journalError.message}`));
+    }
+    // The database folder can only be replaced with no server using it
+    await stopMysql();
+    writeRunState();
+    await rollBackSettingsUpdate(journal, error.message);
+  } catch (restoreError) {
+    console.error(`Could not undo the update of the wiki settings: ${restoreError.message}`);
+    error.message = `${error.message}\nהחזרת הוויקי למצבו שלפני עדכון ההגדרות לא הושלמה (${restoreError.message}). ` +
+      'היא תושלם בהפעלה הבאה של השרתים, ועד אז הוויקי לא יופעל.';
+    throw error;
+  }
 }
 
 // Upgrade the installed wiki to the MediaWiki version of versions.js.
@@ -1798,6 +2121,8 @@ async function upgradeMediaWiki() {
     throw new Error('יש לעצור את השרתים לפני שדרוג MediaWiki');
   }
   await recoverInterruptedUpgrade();
+  // The tree that is carried over must hold the settings the database matches
+  await recoverInterruptedSettingsUpdate();
   const from = readMediaWikiVersion(paths.mediaWikiPath);
   checkUpgradeVersions(from, to);
 
@@ -1810,13 +2135,7 @@ async function upgradeMediaWiki() {
 
   const php = requirePhp();
   requireDatabase();
-  // A database server left running by a crashed earlier run would keep
-  // changing the files the backup copies; the app starts this clean-up
-  // without waiting for it, so it is done (again) here before anything is copied
-  await cleanupStaleProcesses();
-  if (readRunState().mysql) {
-    throw new Error('שרת מסד נתונים מהפעלה קודמת של האפליקציה עדיין פועל ולא ניתן לעצור אותו, ולכן לא ניתן לשדרג את MediaWiki. יש לסגור את האפליקציה ולפתוח אותה שוב');
-  }
+  await stopLeftoverDatabase('לא ניתן לשדרג את MediaWiki');
   const localSettingsSource = fs.readFileSync(paths.localSettings, 'utf8');
 
   upgrading = true;
@@ -1895,6 +2214,8 @@ module.exports = {
   installMediaWiki,
   upgradeMediaWiki,
   recoverInterruptedUpgrade,
+  recoverInterruptedSettingsUpdate,
+  retrySettingsUpdate,
   startServers,
   stopServers,
   // Building blocks, exported for the tests only

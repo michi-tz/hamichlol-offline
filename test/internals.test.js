@@ -159,6 +159,50 @@ describe('Server manager building blocks', function() {
       expect(isAlive(child.pid)).to.be.true;
     });
 
+    // Linux shows an empty command line for a moment while a program starts
+    // (about half a millisecond, e.g. while the "#!/usr/bin/env node" line of
+    // the fake server hands over to node), as it does for a process that has
+    // exited. Taking the first for the second would leave a server running
+    // while its database is copied.
+    it('should not take a live server for gone while its command line reads empty', async function() {
+      if (process.platform !== 'linux') {
+        this.skip(); // reads /proc
+      }
+      const child = await startProcess([MARKER]);
+      const cmdline = `/proc/${child.pid}/cmdline`;
+      const realRead = fs.readFileSync;
+      let emptyReads = 0;
+      fs.readFileSync = (file, ...rest) => {
+        if (file === cmdline && emptyReads < 3) {
+          emptyReads += 1;
+          return '';
+        }
+        return realRead.call(fs, file, ...rest);
+      };
+      try {
+        expect(await identifyProcess({ pid: child.pid, exe: process.execPath, marker: MARKER })).to.equal('ours');
+        expect(emptyReads).to.equal(3);
+        // Empty for good, but alive: not guessed at either way
+        emptyReads = -Infinity;
+        expect(await identifyProcess({ pid: child.pid, exe: process.execPath, marker: MARKER })).to.equal('unknown');
+      } finally {
+        fs.readFileSync = realRead;
+      }
+    });
+
+    it('should report a process that has exited but is not reaped yet as gone', async function() {
+      if (process.platform !== 'linux') {
+        this.skip(); // the zombie check reads /proc
+      }
+      // "true" exits at once; its parent then runs sleep, which never reaps it
+      const parent = spawn('sh', ['-c', 'true & echo $!; exec sleep 5'], { stdio: ['ignore', 'pipe', 'ignore'] });
+      children.push(parent);
+      const pid = Number(await new Promise(resolve => parent.stdout.once('data', data => resolve(String(data).trim()))));
+      expect(await waitFor(() => /\) Z/.test(fs.readFileSync(`/proc/${pid}/stat`, 'utf8')))).to.be.true;
+
+      expect(await identifyProcess({ pid, exe: '/usr/bin/true', marker: 'true' })).to.equal('gone');
+    });
+
     it('should never claim this test process or the init process', async function() {
       expect(await identifyProcess({ pid: process.pid, exe: process.execPath, marker: MARKER })).to.equal('gone');
       expect(await identifyProcess({ pid: 1, exe: process.execPath, marker: MARKER })).to.equal('gone');

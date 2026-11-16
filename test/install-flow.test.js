@@ -6,6 +6,7 @@ const { describe, it, before, after, beforeEach, afterEach } = require('mocha');
 const { expect } = require('chai');
 const fs = require('fs');
 const path = require('path');
+const { spawn } = require('child_process');
 
 const {
   FAKE_PHP,
@@ -541,24 +542,391 @@ describe('Real installation flow with fake servers', function() {
       expect(fs.readFileSync(getPaths().localSettings, 'utf8')).to.equal(switchedOff);
     });
 
-    it('should not start the wiki while the schema update fails, and retry on the next start', async function() {
+    it('should leave no copy of the database and no blocked sync after a successful update', async function() {
       await installMediaWiki(VALID_CONFIG);
-      process.env.FAKE_PHP_UPDATE_FAILS = '1';
-      let error;
-      try {
-        error = await startServers().then(() => null, failure => failure);
-      } finally {
-        delete process.env.FAKE_PHP_UPDATE_FAILS;
-      }
-
-      expect(error.message).to.include('update.php').and.to.include('table mw_fake is broken');
-      expect(getStatus().running).to.be.false;
-      expect(fs.existsSync(getPaths().runStateFile)).to.be.false;
-      expect(stamp()).to.be.null;
 
       await startServers();
+
+      expect(updates()).to.equal(1);
+      expect(getStatus().syncBlocked).to.be.null;
+      expect(fs.readdirSync(tempDir).sort()).to.deep.equal(['database', 'mediawiki', 'run-state.json', 'server']);
+      expect(fs.existsSync(path.join(getPaths().mediaWikiPath, wikiSettings.SCHEMA_FAILURE_FILE))).to.be.false;
+    });
+
+    it('should report a missing PHP as such, not as a failed update, and keep nothing of the attempt', async function() {
+      await installMediaWiki(VALID_CONFIG);
+      fs.rmSync(getPaths().phpExe);
+
+      const error = await startServers().then(() => null, failure => failure);
+
+      expect(error.message).to.include('PHP');
+      expect(getStatus().syncBlocked).to.be.null;
+      expect(fs.readdirSync(tempDir).sort()).to.deep.equal(['database', 'mediawiki', 'server']);
+    });
+  });
+
+  // When the schema update for changed settings fails, the wiki is put back as
+  // it was before (the database and the previous settings) and started like
+  // that, and synchronisation with the site is blocked until an update succeeds.
+  describe('A failed update of the app\'s settings', function() {
+    const UPDATE_QUERY = 'ALTER TABLE fake_update';
+    const updates = () => queries().filter(sql => sql === UPDATE_QUERY).length;
+    const mw = () => getPaths().mediaWikiPath;
+    const read = name => {
+      const file = path.join(mw(), name);
+      return fs.existsSync(file) ? fs.readFileSync(file, 'utf8') : null;
+    };
+    // Everything the restore must bring back
+    const snapshot = () => ({
+      localSettings: read('LocalSettings.php'),
+      settings: read(wikiSettings.SETTINGS_FILE),
+      stamp: read(wikiSettings.SCHEMA_STAMP_FILE),
+      database: fs.readdirSync(getPaths().dbDataDir).sort(),
+      queries: queries()
+    });
+    const leftovers = () => fs.readdirSync(tempDir).filter(name => /settings|\.partial$|\.tmp$/.test(name));
+    const failure = promise => promise.then(() => null, error => error);
+    const addExtension = name => {
+      const dir = path.join(mw(), 'extensions', name);
+      fs.mkdirSync(dir, { recursive: true });
+      fs.writeFileSync(path.join(dir, 'extension.json'), '{}');
+    };
+    // Copies of the database folder made for the settings update
+    let copies;
+    let serversDuringCopy;
+    let realCpSync;
+
+    async function startFailing(env = { FAKE_PHP_UPDATE_FAILS: '1' }) {
+      const restore = setEnv(env);
+      try {
+        return await startServers();
+      } finally {
+        restore();
+      }
+    }
+
+    // A wiki whose settings were updated once, and then changed (as by a new
+    // version of the app): the next start runs update.php for them
+    async function wikiWithChangedSettings() {
+      await installMediaWiki(VALID_CONFIG);
+      await startServers();
+      await stopServers();
+      addExtension('TemplateStyles');
+      // The first start copied the database for its update too
+      expect(copies).to.equal(1);
+      copies = 0;
+    }
+
+    async function expectWikiRunning() {
+      const { phpPort, mysqlPort, running } = getStatus();
+      expect(running).to.be.true;
+      const info = await (await fetch(`http://127.0.0.1:${phpPort}/`)).json();
+      expect(info.dbPort).to.equal(String(mysqlPort));
+    }
+
+    beforeEach(function() {
+      for (const name of ['Cite', 'Scribunto']) {
+        addExtension(name);
+      }
+      copies = 0;
+      serversDuringCopy = [];
+      realCpSync = fs.cpSync;
+      fs.cpSync = (source, target, ...rest) => {
+        if (target === `${getPaths().settingsDbBackup}.partial`) {
+          copies += 1;
+          // No database server may be writing while the copy is made
+          serversDuringCopy.push(fs.existsSync(getPaths().runStateFile));
+        }
+        return realCpSync.call(fs, source, target, ...rest);
+      };
+    });
+
+    afterEach(function() {
+      fs.cpSync = realCpSync;
+    });
+
+    it('should copy the database before the update, and remove the copy once it succeeded', async function() {
+      await wikiWithChangedSettings();
+
+      await startServers();
+
+      expect(copies).to.equal(1);
+      expect(serversDuringCopy).to.deep.equal([false, false]);
       expect(updates()).to.equal(2);
-      expect(stamp()).to.not.be.null;
+      expect(leftovers()).to.deep.equal([]);
+      expect(getStatus().syncBlocked).to.be.null;
+      expect(read(wikiSettings.SETTINGS_FILE)).to.include("'TemplateStyles',");
+    });
+
+    it('should start the wiki with the database and settings it had before, and block sync', async function() {
+      await wikiWithChangedSettings();
+      const before = snapshot();
+
+      await startFailing();
+
+      // update.php reached the database (and failed); the copy taken before it is back
+      const after = snapshot();
+      expect(after.queries.slice(0, before.queries.length)).to.deep.equal(before.queries);
+      expect(after.queries.filter(sql => sql === UPDATE_QUERY)).to.have.lengthOf(1); // the first, successful update
+      expect(after.localSettings).to.equal(before.localSettings);
+      expect(after.settings).to.equal(before.settings).and.to.not.include('TemplateStyles');
+      expect(after.stamp).to.equal(before.stamp);
+      await expectWikiRunning();
+      expect(leftovers()).to.deep.equal([]);
+
+      const { syncBlocked } = getStatus();
+      expect(syncBlocked).to.include({ reason: 'settings-update-failed' });
+      expect(syncBlocked.message).to.include('נכשל').and.to.include('הוחזר למצבו הקודם').and.to.include('הסנכרון עם אתר המכלול חסום');
+      expect(syncBlocked.details).to.include('update.php').and.to.include('table mw_fake is broken');
+      expect(Date.parse(syncBlocked.since)).to.be.closeTo(Date.now(), 60000);
+    });
+
+    it('should keep sync blocked across a restart of the app', async function() {
+      await wikiWithChangedSettings();
+      await startFailing();
+      const { syncBlocked } = getStatus();
+      await stopServers();
+
+      delete require.cache[require.resolve('../src/server-manager')];
+      const fresh = require('../src/server-manager');
+      fresh.setDataPath(tempDir);
+      try {
+        expect(fresh.getStatus().syncBlocked).to.deep.equal(syncBlocked);
+        await fresh.startServers();
+        expect(fresh.getStatus().syncBlocked).to.deep.equal(syncBlocked);
+      } finally {
+        await fresh.stopServers();
+        require.cache[require.resolve('../src/server-manager')].exports = serverManager;
+      }
+    });
+
+    it('should not try the same settings again at every start, only other settings or when asked', async function() {
+      await wikiWithChangedSettings();
+      await startFailing();
+      const { since } = getStatus().syncBlocked;
+      await stopServers();
+      expect(copies).to.equal(1);
+      expect(updates()).to.equal(1);
+
+      // Same settings: no copy, no update, the wiki runs as it was put back
+      await startServers();
+      expect(copies).to.equal(1);
+      expect(updates()).to.equal(1);
+      expect(read(wikiSettings.SETTINGS_FILE)).to.not.include('TemplateStyles');
+      await expectWikiRunning();
+      expect(getStatus().syncBlocked.since).to.equal(since);
+      await stopServers();
+
+      // Other settings (e.g. a newer app) are tried; still failing, sync stays
+      // blocked since the first failure
+      addExtension('ImageMap');
+      await startFailing();
+      expect(copies).to.equal(2);
+      expect(getStatus().syncBlocked.since).to.equal(since);
+      await stopServers();
+
+      // Asked for: tried again, and once it succeeds sync is no longer blocked
+      serverManager.retrySettingsUpdate();
+      await startServers();
+      expect(copies).to.equal(3);
+      expect(updates()).to.equal(2);
+      expect(getStatus().syncBlocked).to.be.null;
+      expect(read(wikiSettings.SETTINGS_FILE)).to.include("'TemplateStyles',").and.to.include("'ImageMap',");
+      expect(wikiSettings.readSchemaStamp(mw())).to.equal(wikiSettings.settingsHash(read(wikiSettings.SETTINGS_FILE)));
+    });
+
+    it('should start a freshly installed wiki without the app\'s settings when their first update fails', async function() {
+      await installMediaWiki(VALID_CONFIG);
+      const installed = read('LocalSettings.php');
+      const databaseBefore = queries();
+
+      await startFailing();
+
+      // The wiki as install.php made it: without the settings file and the line that includes it
+      expect(read('LocalSettings.php')).to.equal(wikiSettings.removeInclude(installed));
+      expect(read('LocalSettings.php')).to.not.include(wikiSettings.SETTINGS_FILE);
+      expect(read(wikiSettings.SETTINGS_FILE)).to.be.null;
+      expect(read(wikiSettings.SCHEMA_STAMP_FILE)).to.be.null;
+      expect(queries().slice(0, databaseBefore.length)).to.deep.equal(databaseBefore);
+      expect(queries()).to.not.include(UPDATE_QUERY);
+      await expectWikiRunning();
+      expect(getStatus().syncBlocked).to.include({ reason: 'settings-update-failed' });
+      await stopServers();
+
+      // Not tried again by itself; the line stays out
+      await startServers();
+      expect(read('LocalSettings.php')).to.not.include(wikiSettings.SETTINGS_FILE);
+      await stopServers();
+
+      serverManager.retrySettingsUpdate();
+      await startServers();
+      expect(read('LocalSettings.php')).to.equal(installed);
+      expect(read(wikiSettings.SETTINGS_FILE)).to.equal(wikiSettings.buildSettings(mw()));
+      expect(getStatus().syncBlocked).to.be.null;
+    });
+
+    it('should leave a wiki of an earlier version of the app exactly as it was when the first update fails', async function() {
+      await installMediaWiki(VALID_CONFIG);
+      const own = read('LocalSettings.php').replace(/\n# Added by Hamichlol Offline: extensions[\s\S]*$/, '\n') +
+        "$wgDefaultSkin = 'timeless';\n";
+      fs.writeFileSync(getPaths().localSettings, own);
+      fs.rmSync(path.join(mw(), wikiSettings.SETTINGS_FILE));
+
+      await startFailing();
+
+      expect(read('LocalSettings.php')).to.equal(own);
+      expect(read(wikiSettings.SETTINGS_FILE)).to.be.null;
+      await expectWikiRunning();
+      expect(getStatus().syncBlocked).to.include({ reason: 'settings-update-failed' });
+    });
+
+    it('should start the wiki as it was when the database cannot be copied', async function() {
+      await wikiWithChangedSettings();
+      const before = snapshot();
+      fs.cpSync = () => {
+        const error = new Error('ENOSPC: no space left on device, copyfile');
+        error.code = 'ENOSPC';
+        throw error;
+      };
+
+      await startServers();
+
+      const after = snapshot();
+      expect(after.settings).to.equal(before.settings);
+      expect(after.stamp).to.equal(before.stamp);
+      expect(updates()).to.equal(1);
+      await expectWikiRunning();
+      expect(getStatus().syncBlocked.details).to.include('no space left');
+      expect(leftovers()).to.deep.equal([]);
+    });
+
+    it('should not start the wiki when it cannot be put back, and finish that on the next start', async function() {
+      await wikiWithChangedSettings();
+      const before = snapshot();
+      const { dbDataDir, settingsJournal } = getPaths();
+      const realRename = fs.renameSync;
+      fs.renameSync = (from, to) => {
+        if (to === dbDataDir) {
+          const error = new Error(`EACCES: permission denied, rename '${from}'`);
+          error.code = 'EACCES';
+          throw error;
+        }
+        return realRename.call(fs, from, to);
+      };
+      let error;
+      try {
+        error = await failure(startFailing());
+      } finally {
+        fs.renameSync = realRename;
+      }
+
+      expect(error.message).to.include('table mw_fake is broken')
+        .and.to.include('לא הושלמה').and.to.include('permission denied').and.to.include('בהפעלה הבאה');
+      expect(getStatus().running).to.be.false;
+      expect(fs.existsSync(getPaths().runStateFile)).to.be.false;
+      expect(readJson(settingsJournal)).to.include({ phase: 'restore' });
+      expect(getStatus().syncBlocked).to.include({ reason: 'settings-update-unfinished' });
+
+      await startServers();
+
+      const after = snapshot();
+      expect(after.settings).to.equal(before.settings);
+      expect(after.stamp).to.equal(before.stamp);
+      expect(after.queries.slice(0, before.queries.length)).to.deep.equal(before.queries);
+      expect(updates()).to.equal(1);
+      await expectWikiRunning();
+      expect(getStatus().syncBlocked).to.include({ reason: 'settings-update-failed' });
+      expect(getStatus().syncBlocked.details).to.include('table mw_fake is broken');
+      expect(leftovers()).to.deep.equal([]);
+    });
+
+    it('should finish a restore that a crash cut off, before the wiki starts', async function() {
+      await wikiWithChangedSettings();
+      const before = snapshot();
+      const { dbDataDir, settingsDbBackup, settingsJournal } = getPaths();
+      // As the failed update leaves it: the copy, the journal with the
+      // previous files, the new settings and a changed database...
+      const previous = wikiSettings.previousFiles(mw());
+      fs.cpSync(dbDataDir, settingsDbBackup, { recursive: true });
+      const { hash } = wikiSettings.writeSettings(mw());
+      fs.writeFileSync(settingsJournal, JSON.stringify({ settings: hash, phase: 'restore', error: 'update.php: boom', previous }));
+      fs.appendFileSync(path.join(dbDataDir, 'queries.log'), `${UPDATE_QUERY}\n`);
+      // ...cut off between removing the changed database and moving the copy back
+      fs.rmSync(dbDataDir, { recursive: true });
+
+      await startServers();
+
+      const after = snapshot();
+      expect(after.settings).to.equal(before.settings);
+      expect(after.stamp).to.equal(before.stamp);
+      expect(after.queries.slice(0, before.queries.length)).to.deep.equal(before.queries);
+      expect(updates()).to.equal(1);
+      await expectWikiRunning();
+      expect(getStatus().syncBlocked.details).to.equal('update.php: boom');
+      expect(copies).to.equal(0);
+      expect(leftovers()).to.deep.equal([]);
+    });
+
+    it('should throw away a copy that a crash cut off, and try the update again', async function() {
+      await wikiWithChangedSettings();
+      const { settingsDbBackup, settingsJournal } = getPaths();
+      fs.mkdirSync(`${settingsDbBackup}.partial`, { recursive: true });
+      fs.writeFileSync(settingsJournal, JSON.stringify({ settings: 'x', phase: 'prepare', previous: wikiSettings.previousFiles(mw()) }));
+
+      await startServers();
+
+      expect(updates()).to.equal(2);
+      expect(getStatus().syncBlocked).to.be.null;
+      expect(leftovers()).to.deep.equal([]);
+    });
+
+    it('should put the wiki back when the app was killed while update.php ran', async function() {
+      await wikiWithChangedSettings();
+      const before = snapshot();
+      const { settingsJournal, runStateFile } = getPaths();
+      // The start runs in a separate process, which is killed half-way
+      const script = `
+        process.env.DEV_MODE = 'false';
+        const serverManager = require(${JSON.stringify(require.resolve('../src/server-manager'))});
+        serverManager.setDataPath(${JSON.stringify(tempDir)});
+        serverManager.startServers().then(() => console.log('started'), error => console.log(error.message));
+      `;
+      const child = spawn(process.execPath, ['-e', script], { env: { ...process.env, FAKE_PHP_UPDATE_HANGS: '1' }, stdio: 'ignore' });
+      try {
+        expect(await waitFor(() => fs.existsSync(settingsJournal) && readJson(settingsJournal).phase === 'update' &&
+          updates() === 2, 15000)).to.be.true;
+      } finally {
+        child.kill('SIGKILL');
+      }
+      await waitFor(() => !isAlive(child.pid));
+      // The database server it started outlived it
+      const leftover = readJson(runStateFile).mysql;
+      expect(isAlive(leftover.pid)).to.be.true;
+      expect(read(wikiSettings.SETTINGS_FILE)).to.include('TemplateStyles');
+
+      await startServers();
+
+      expect(await waitFor(() => !isAlive(leftover.pid))).to.be.true;
+      const after = snapshot();
+      expect(after.settings).to.equal(before.settings);
+      expect(after.stamp).to.equal(before.stamp);
+      expect(after.localSettings).to.equal(before.localSettings);
+      expect(after.queries.slice(0, before.queries.length)).to.deep.equal(before.queries);
+      expect(updates()).to.equal(1);
+      await expectWikiRunning();
+      expect(getStatus().syncBlocked.details).to.include('הופסק');
+      expect(leftovers()).to.deep.equal([]);
+    });
+
+    it('should refuse to guess when the journal is damaged', async function() {
+      await wikiWithChangedSettings();
+      fs.writeFileSync(getPaths().settingsJournal, '{"phase": "upd');
+
+      const error = await failure(startServers());
+
+      expect(error.message).to.include('פגום');
+      expect(getStatus().running).to.be.false;
+      expect(getStatus().syncBlocked).to.include({ reason: 'settings-update-unfinished' });
     });
   });
 });

@@ -467,6 +467,14 @@
     .upgrade-notice p { flex: 1; margin: 0; font-size: 14px; }
     .upgrade-notice .btn { flex: none; }
 
+    /* The wiki runs, but synchronisation with the site is blocked (a failed
+       update of the app's settings): a warning, not an error */
+    .sync-notice { border-color: #f3d19e; background: var(--warning-soft); color: var(--warning); }
+    .sync-notice p { white-space: pre-line; }
+    .sync-details { display: block; margin-top: 6px; color: var(--text-muted); font-size: 13px; }
+    .sync-details:empty { display: none; }
+    .sync-notice .btn[hidden] { display: none; }
+
     /* Status line */
     .status {
       display: flex;
@@ -629,6 +637,15 @@
     }
     .bar-status.error .dot { display: none; }
     .bar-status.error .bar-status-icon { display: inline-block; }
+
+    .bar-status.warning {
+      background: var(--warning-soft);
+      color: var(--warning);
+      border-color: #f3d19e;
+      cursor: help;
+    }
+    .bar-status.warning .dot { display: none; }
+    .bar-status.warning .bar-status-icon { display: inline-block; }
 
     /* Only the page title and the status pill give way in a narrow window */
     .bar-brand, .icon-btn, .bar-divider, .wiki-bar .btn { flex: none; }
@@ -808,6 +825,13 @@
               <span>שדרג</span>
             </button>
           </div>
+          <div class="upgrade-notice sync-notice" id="syncNotice" hidden>
+            <p><span id="syncText"></span><bdi class="sync-details" id="syncDetails" dir="auto"></bdi></p>
+            <button type="button" class="btn btn-secondary" id="retrySettingsBtn">
+              <span class="spinner" aria-hidden="true"></span>
+              <span>נסה שוב</span>
+            </button>
+          </div>
         </div>
       </section>
 
@@ -833,6 +857,10 @@
     const upgradeNotice = document.getElementById('upgradeNotice');
     const upgradeText = document.getElementById('upgradeText');
     const upgradeBtn = document.getElementById('upgradeBtn');
+    const syncNotice = document.getElementById('syncNotice');
+    const syncText = document.getElementById('syncText');
+    const syncDetails = document.getElementById('syncDetails');
+    const retrySettingsBtn = document.getElementById('retrySettingsBtn');
     const statusEl = document.getElementById('status');
     const statusText = document.getElementById('statusText');
     const toolsList = document.getElementById('toolsList');
@@ -863,6 +891,8 @@
       stop: 'שגיאה בכיבוי השרתים',
       restart: 'שגיאה בהפעלה מחדש של השרתים',
       upgrade: 'שגיאה בשדרוג MediaWiki',
+      retrySettings: 'שגיאה בעדכון הגדרות הוויקי',
+      settings: 'שגיאה בעדכון הגדרות הוויקי',
       crash: 'שגיאה'
     };
 
@@ -872,7 +902,8 @@
       start: 'מפעיל שרתים...',
       stop: 'מכבה שרתים...',
       restart: 'מפעיל מחדש את השרתים...',
-      upgrade: 'משדרג את MediaWiki...'
+      upgrade: 'משדרג את MediaWiki...',
+      retrySettings: 'מעדכן את הגדרות הוויקי...'
     };
 
     // Short forms for the wiki bar; the full text is in its tooltip
@@ -880,17 +911,29 @@
       start: 'ההפעלה נכשלה',
       stop: 'הכיבוי נכשל',
       restart: 'ההפעלה מחדש נכשלה',
-      upgrade: 'השדרוג נכשל'
+      upgrade: 'השדרוג נכשל',
+      retrySettings: 'עדכון ההגדרות נכשל',
+      settings: 'עדכון ההגדרות נכשל'
     };
+
+    // The wiki runs, but synchronisation with the site must wait
+    // (state.syncBlocked); the short form for the wiki bar, by reason
+    const SYNC_BLOCKED_DETAILS = {
+      'settings-update-failed': 'עדכון ההגדרות של הוויקי נכשל'
+    };
+    const syncBlockedTitle = blocked =>
+      blocked.details ? `${blocked.message}\n\nפרטי השגיאה:\n${blocked.details}` : blocked.message;
 
     const busyText = busy => BUSY_MESSAGES[busy] || 'עובד...';
     const errorText = error => `${ERROR_PREFIXES[error.action] || 'שגיאה'}: ${error.message}`;
 
     // The pill in the wiki bar. While the wiki is shown it covers the status
     // line, so the bar shows an operation in progress or a failed one (a stop
-    // or restart that left the servers running) in place of "running".
+    // or restart that left the servers running) in place of "running", and
+    // otherwise that the wiki runs with sync blocked (a warning: the wiki
+    // itself did start).
     function showServersIndicator() {
-      const { busy, error, running } = state;
+      const { busy, error, running, syncBlocked } = state;
       let kind = 'running';
       let label = 'השרתים פועלים';
       let detail = '';
@@ -903,6 +946,11 @@
         label = `${BAR_ERROR_LABELS[error.action] || 'שגיאה'}:`;
         detail = error.message;
         title = errorText(error);
+      } else if (syncBlocked) {
+        kind = 'warning';
+        label = 'הסנכרון חסום:';
+        detail = SYNC_BLOCKED_DETAILS[syncBlocked.reason] || syncBlocked.message;
+        title = syncBlockedTitle(syncBlocked);
       }
       serversIndicator.className = `bar-status ${kind}`;
       serversIndicator.title = title;
@@ -1027,6 +1075,20 @@
       }
       upgradeBtn.disabled = Boolean(busy);
       setLoading(upgradeBtn, busy === 'upgrade');
+
+      // The wiki starts as it was before a failed update of its settings
+      const blocked = state.syncBlocked;
+      syncNotice.hidden = !blocked;
+      if (blocked) {
+        syncText.textContent = blocked.reason === 'settings-update-failed'
+          ? `${blocked.message}. הוויקי מופעל עם מסד הנתונים וההגדרות שהיו לו לפני העדכון. ` +
+            'העדכון ינוסה שוב כשההגדרות של האפליקציה ישתנו (למשל בגרסה חדשה), או בלחיצה על "נסה שוב".'
+          : `${blocked.message}.`;
+        syncDetails.textContent = blocked.details || '';
+      }
+      retrySettingsBtn.hidden = !blocked || blocked.reason !== 'settings-update-failed';
+      retrySettingsBtn.disabled = Boolean(busy);
+      setLoading(retrySettingsBtn, busy === 'retrySettings');
 
       showServersIndicator();
 
@@ -1180,6 +1242,7 @@
     startServersBtn.addEventListener('click', () => runOperation('start-servers'));
     stopServersBtn.addEventListener('click', () => runOperation('stop-servers'));
     upgradeBtn.addEventListener('click', () => runOperation('upgrade-mediawiki'));
+    retrySettingsBtn.addEventListener('click', () => runOperation('retry-settings-update'));
 
     refreshView()
       .then(checkAdminCredentials)

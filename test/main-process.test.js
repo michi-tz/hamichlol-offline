@@ -882,6 +882,63 @@ describe('Electron main process', function() {
     });
   });
 
+  describe('A failed update of the wiki settings', function() {
+    const wikiSettings = require('../src/wiki-settings');
+    const item = id => findItem(fake.menu.current, id);
+    // As syncWikiSettings records it; dev mode never runs the update itself
+    const recordFailure = () => wikiSettings.writeSchemaFailure(
+      serverManager.getPaths().mediaWikiPath, 'abc', 'update.php failed: table mw_fake is broken');
+
+    it('should report blocked sync in the state, not as a failed start, and offer to try again', async function() {
+      await loadMain();
+      await invoke('download-servers');
+      await invoke('install-mediawiki', VALID_CONFIG);
+      recordFailure();
+
+      expect(await invoke('start-servers')).to.include({ success: true });
+
+      const state = await invoke('get-status');
+      expect(state).to.include({ running: true, wikiShown: true, error: null });
+      expect(state.syncBlocked).to.include({ reason: 'settings-update-failed', details: 'update.php failed: table mw_fake is broken' });
+      expect(state.syncBlocked.message).to.include('הסנכרון עם אתר המכלול חסום');
+      expect(item('retrySettings').enabled).to.be.true;
+
+      const before = stateUpdates(fake.windows[0]).length;
+      expect(await invoke('retry-settings-update')).to.include({ success: true });
+
+      const updates = stateUpdates(fake.windows[0]).slice(before);
+      expect(updates[0]).to.include({ busy: 'retrySettings' });
+      expect(updates.pop()).to.include({ busy: null, error: null, running: true, syncBlocked: null });
+      expect(item('retrySettings')).to.be.null;
+    });
+
+    it('should be undone at start-up when a crash cut it off', async function() {
+      process.env.DEV_MODE = 'false';
+      const dataDir = path.join(tempDir, 'userData', 'data');
+      fs.mkdirSync(path.join(dataDir, 'database.settings-backup.partial'), { recursive: true });
+      fs.writeFileSync(path.join(dataDir, 'wiki-settings-update.json'), JSON.stringify({ settings: 'abc', phase: 'prepare', previous: {} }));
+
+      await loadMain();
+
+      expect(fs.existsSync(path.join(dataDir, 'database.settings-backup.partial'))).to.be.false;
+      expect(fs.existsSync(path.join(dataDir, 'wiki-settings-update.json'))).to.be.false;
+      expect((await invoke('get-status')).error).to.be.null;
+    });
+
+    it('should report at start-up a journal it cannot act on', async function() {
+      process.env.DEV_MODE = 'false';
+      const dataDir = path.join(tempDir, 'userData', 'data');
+      fs.mkdirSync(dataDir, { recursive: true });
+      fs.writeFileSync(path.join(dataDir, 'wiki-settings-update.json'), '{"phase": ');
+
+      await loadMain();
+
+      const { error } = await invoke('get-status');
+      expect(error.action).to.equal('settings');
+      expect(error.message).to.include('פגום');
+    });
+  });
+
   describe('Checking the administrator account', function() {
     beforeEach(() => loadMain());
 

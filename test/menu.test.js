@@ -6,7 +6,7 @@ const { expect } = require('chai');
 const { buildMenuTemplate, findItem } = require('../src/menu');
 
 const ACTIONS = [
-  'start', 'stop', 'restart', 'upgrade', 'quit', 'wikiHome', 'wikiBack', 'wikiForward', 'wikiReload',
+  'start', 'stop', 'restart', 'upgrade', 'retrySettings', 'quit', 'wikiHome', 'wikiBack', 'wikiForward', 'wikiReload',
   'wikiOpenExternal', 'zoomIn', 'zoomOut', 'zoomReset', 'toggleDevTools', 'about', 'openDataFolder'
 ];
 
@@ -90,6 +90,24 @@ describe('Application menu', function() {
     const { actions, calls } = recordingActions();
     findItem(buildMenuTemplate({ ...STATES.stopped, upgrade }, actions, { platform: 'linux' }), 'upgrade').click();
     expect(calls).to.deep.equal(['upgrade']);
+  });
+
+  it('should offer to retry the update of the wiki settings only after it failed', function() {
+    const failed = { reason: 'settings-update-failed', since: null, message: 'x', details: null };
+    for (const state of Object.values(STATES)) {
+      expect(findItem(build(state), 'retrySettings')).to.be.null;
+    }
+    // Not while a cut-off update is still to be undone (the next start does that)
+    expect(findItem(build({ ...STATES.stopped, syncBlocked: { ...failed, reason: 'settings-update-unfinished' } }), 'retrySettings')).to.be.null;
+
+    for (const [state, enabled] of [[STATES.stopped, true], [STATES.running, true], [STATES.busy, false]]) {
+      const item = findItem(build({ ...state, syncBlocked: failed }), 'retrySettings');
+      expect(item.enabled).to.equal(enabled);
+      expect(item.label).to.include('הגדרות הוויקי');
+    }
+    const { actions, calls } = recordingActions();
+    findItem(buildMenuTemplate({ ...STATES.stopped, syncBlocked: failed }, actions, { platform: 'linux' }), 'retrySettings').click();
+    expect(calls).to.deep.equal(['retrySettings']);
   });
 
   it('should enable every wiki command only while the wiki is shown', function() {

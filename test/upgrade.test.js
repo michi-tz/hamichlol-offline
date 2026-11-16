@@ -297,6 +297,26 @@ describe('Upgrading an installed wiki', function() {
       expect(queries().filter(sql => sql === UPDATE_QUERY)).to.have.lengthOf(1);
     });
 
+    it('should unblock sync after a failed update of the settings once an upgrade succeeds, and only then', async function() {
+      // The first start's update of the settings fails: the wiki runs without them
+      process.env.FAKE_PHP_UPDATE_FAILS = '1';
+      await startServers();
+      await stopServers();
+      expect(getStatus().syncBlocked).to.include({ reason: 'settings-update-failed' });
+
+      await failure(upgradeMediaWiki());
+      expect(getStatus().syncBlocked).to.include({ reason: 'settings-update-failed' });
+      delete process.env.FAKE_PHP_UPDATE_FAILS;
+
+      // The upgrade's update.php covers the settings of the new release
+      await upgradeMediaWiki();
+      expect(getStatus().syncBlocked).to.be.null;
+      const { mediaWikiPath } = getPaths();
+      expect(fs.readFileSync(getPaths().localSettings, 'utf8')).to.include(`require_once "$IP/${wikiSettings.SETTINGS_FILE}";`);
+      expect(wikiSettings.readSchemaStamp(mediaWikiPath))
+        .to.equal(wikiSettings.settingsHash(fs.readFileSync(path.join(mediaWikiPath, wikiSettings.SETTINGS_FILE), 'utf8')));
+    });
+
     it('should leave the old wiki without them when the upgrade fails', async function() {
       asInstalledByEarlierVersion();
       const before = snapshot();
@@ -363,7 +383,15 @@ describe('Upgrading an installed wiki', function() {
       const port = await require('portfinder').getPortPromise({ port: 33306 });
       const stale = spawn(exe, ['--no-defaults', marker, `--port=${port}`, '--bind-address=127.0.0.1'], { stdio: 'ignore' });
       try {
-        expect(await waitFor(() => fs.existsSync(path.join(dbDataDir, 'args.json')))).to.be.true;
+        // Running and listening, as a crashed run leaves it (its args.json
+        // proves nothing: the installation's own server already wrote one)
+        expect(await waitFor(() => new Promise(resolve => {
+          const socket = require('net').connect({ host: '127.0.0.1', port }, () => {
+            socket.destroy();
+            resolve(true);
+          });
+          socket.once('error', () => resolve(false));
+        }))).to.be.true;
         fs.writeFileSync(runStateFile, JSON.stringify({ mysql: { pid: stale.pid, port, exe, marker } }));
         // The download fails, so the upgrade never gets as far as starting its
         // own database server: only a check before the copy stops the stale one
