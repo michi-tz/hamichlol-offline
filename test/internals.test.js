@@ -179,7 +179,16 @@ describe('Server manager building blocks', function() {
       fs.writeFileSync(path.join(mediaWikiPath, 'index.php'), '');
       fs.writeFileSync(localSettings, '');
 
-      const error = await startServers().then(() => null, failure => failure);
+      // No PHP either, and the schema update of the app's settings is due, as
+      // on a Windows computer: the database program is still the one named,
+      // whatever PHP is installed on the computer running the test
+      const restore = setEnv({ HAMICHLOL_USE_SYSTEM: 'false' });
+      let error;
+      try {
+        error = await startServers().then(() => null, failure => failure);
+      } finally {
+        restore();
+      }
 
       expect(error).to.be.an('error');
       expect(error.message).to.include('MySQL could not be started').and.to.include(server);

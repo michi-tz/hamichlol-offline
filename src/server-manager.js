@@ -1396,11 +1396,13 @@ async function startServers() {
     return { phpPort, mysqlPort };
   }
 
-  await syncWikiSettings();
-
+  // The database first, whatever else is due: a problem with it is reported
+  // as such, and the schema update below runs on this same server
   const mysqlWasRunning = mysqlProcess !== null;
   await startMysql();
   try {
+    // Until the schema update has succeeded, PHP (the wiki) is not started
+    await syncWikiSettings();
     await startPhp();
   } catch (error) {
     // Half-started servers would be reported as "not running", with no way to stop them
@@ -1769,7 +1771,8 @@ async function runSchemaUpdate(php) {
 // to date, and run the schema update when its content changed since the last
 // successful one: an extension the app enables may add tables. update.php is
 // idempotent, so a run that failed or was cut off is simply repeated on the
-// next start; until it succeeds the wiki is not started.
+// next start; until it succeeds the wiki is not started. Called by
+// startServers with the database server already running, which it leaves running.
 async function syncWikiSettings() {
   const { mediaWikiPath } = getPaths();
   const { hash, schemaUpToDate } = wikiSettings.writeSettings(mediaWikiPath);

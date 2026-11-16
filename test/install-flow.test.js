@@ -471,6 +471,35 @@ describe('Real installation flow with fake servers', function() {
       expect(updates()).to.equal(1);
     });
 
+    it('should run it on the database server the wiki then uses, started once', async function() {
+      await installMediaWiki(VALID_CONFIG);
+      const shutdowns = () => queries().filter(sql => sql === 'SHUTDOWN').length;
+      const before = shutdowns();
+
+      await startServers();
+
+      // The update reached the server, which kept running for the wiki
+      expect(updates()).to.equal(1);
+      expect(shutdowns()).to.equal(before);
+      const state = readJson(getPaths().runStateFile);
+      expect(isAlive(state.mysql.pid)).to.be.true;
+      expect(readJson(path.join(getPaths().mediaWikiPath, 'update-args.json')).dbPort).to.equal(String(state.mysql.port));
+    });
+
+    it('should report a missing PHP only after the database, and leave nothing running', async function() {
+      await installMediaWiki(VALID_CONFIG);
+      fs.rmSync(getPaths().phpExe);
+
+      const error = await startServers().then(() => null, failure => failure);
+
+      expect(error.message).to.include('PHP');
+      expect(updates()).to.equal(0);
+      expect(stamp()).to.be.null;
+      expect(getStatus().running).to.be.false;
+      expect(fs.existsSync(getPaths().runStateFile)).to.be.false;
+      expect(queries().slice(-1)).to.deep.equal(['SHUTDOWN']);
+    });
+
     it('should run it again when the settings change, e.g. a new extension', async function() {
       await installMediaWiki(VALID_CONFIG);
       await startServers();
