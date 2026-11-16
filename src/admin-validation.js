@@ -2,9 +2,12 @@
 //
 // MediaWiki's installer (maintenance/install.php -> CliInstaller) refuses an
 // administrator whose name or password breaks its rules, but only after this
-// app has already created the database. These checks mirror MediaWiki 1.43's
+// app has already created the database. These checks mirror MediaWiki 1.46's
 // rules so that the problem is reported while the user is still filling in the
 // form. They are deliberately never more lenient than MediaWiki itself.
+// Compared with the 1.46.2 source: the rules below are the same as in 1.43
+// (only types and code style changed), and the common password list
+// (wikimedia/common-passwords 0.5.1 instead of 0.5.0) keeps its file format.
 //
 // Password policy (MainConfigSchema::PasswordPolicy, checked by CliInstaller
 // with UserPasswordPolicy::checkUserPasswordForGroups() for the groups

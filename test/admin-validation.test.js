@@ -1,5 +1,5 @@
 // The checks of the administrator's user name and password, which mirror what
-// MediaWiki 1.43's installer accepts (see src/admin-validation.js).
+// MediaWiki 1.46's installer accepts (see src/admin-validation.js).
 
 const { describe, it, beforeEach, afterEach } = require('mocha');
 const { expect } = require('chai');
