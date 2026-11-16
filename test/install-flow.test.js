@@ -24,6 +24,7 @@ const {
   setEnv
 } = require('./helpers');
 const serverManager = require('../src/server-manager');
+const wikiSettings = require('../src/wiki-settings');
 const { MEDIAWIKI_BRANCH } = require('../src/versions');
 
 const { setDataPath, getPaths, getStatus, installMediaWiki, startServers, stopServers } = serverManager;
@@ -419,6 +420,116 @@ describe('Real installation flow with fake servers', function() {
         await fresh.stopServers();
         require.cache[require.resolve('../src/server-manager')].exports = serverManager;
       }
+    });
+  });
+
+  // The app's settings file (src/wiki-settings.js) and the schema update the
+  // extensions it enables may need. The fake update.php sends one statement,
+  // so queries.log shows each run.
+  describe('The app\'s extensions and settings', function() {
+    const UPDATE_QUERY = 'ALTER TABLE fake_update';
+    const updates = () => queries().filter(sql => sql === UPDATE_QUERY).length;
+    const settingsPath = () => path.join(getPaths().mediaWikiPath, wikiSettings.SETTINGS_FILE);
+    const stamp = () => wikiSettings.readSchemaStamp(getPaths().mediaWikiPath);
+
+    beforeEach(function() {
+      // Two of the bundled extensions, as in the release
+      for (const name of ['Cite', 'Scribunto']) {
+        const dir = path.join(getPaths().mediaWikiPath, 'extensions', name);
+        fs.mkdirSync(dir, { recursive: true });
+        fs.writeFileSync(path.join(dir, 'extension.json'), '{}');
+      }
+    });
+
+    it('should be in place right after the installation', async function() {
+      await installMediaWiki(VALID_CONFIG);
+
+      const settings = fs.readFileSync(getPaths().localSettings, 'utf8');
+      expect(settings.trimEnd().endsWith(`require_once "$IP/${wikiSettings.SETTINGS_FILE}";`)).to.be.true;
+      expect(fs.readFileSync(settingsPath(), 'utf8')).to.equal(wikiSettings.buildSettings(getPaths().mediaWikiPath));
+      // The schema update is left to the first start
+      expect(updates()).to.equal(0);
+      expect(stamp()).to.be.null;
+    });
+
+    it('should run the schema update once, on the first start', async function() {
+      await installMediaWiki(VALID_CONFIG);
+
+      const ports = await startServers();
+
+      expect(updates()).to.equal(1);
+      expect(stamp()).to.equal(wikiSettings.settingsHash(fs.readFileSync(settingsPath(), 'utf8')));
+      // The database the update started is the one the wiki runs on
+      const info = await (await fetch(`http://127.0.0.1:${ports.phpPort}/`)).json();
+      expect(info.dbPort).to.equal(String(ports.mysqlPort));
+      // This layout has no maintenance/run.php, so update.php runs by itself
+      expect(readJson(path.join(getPaths().mediaWikiPath, 'update-args.json')).args.slice(-2))
+        .to.deep.equal([path.join(getPaths().mediaWikiPath, 'maintenance', 'update.php'), '--quick']);
+
+      await stopServers();
+      await startServers();
+      expect(updates()).to.equal(1);
+    });
+
+    it('should run it again when the settings change, e.g. a new extension', async function() {
+      await installMediaWiki(VALID_CONFIG);
+      await startServers();
+      await stopServers();
+      const dir = path.join(getPaths().mediaWikiPath, 'extensions', 'TemplateStyles');
+      fs.mkdirSync(dir);
+      fs.writeFileSync(path.join(dir, 'extension.json'), '{}');
+
+      await startServers();
+
+      expect(updates()).to.equal(2);
+      expect(fs.readFileSync(settingsPath(), 'utf8')).to.include("'TemplateStyles',");
+    });
+
+    it('should add them to a wiki installed by an earlier version of the app, keeping its settings', async function() {
+      await installMediaWiki(VALID_CONFIG);
+      // As the earlier version left it: no include, no settings file, own edits
+      const own = fs.readFileSync(getPaths().localSettings, 'utf8')
+        .replace(/\n# Added by Hamichlol Offline: extensions[\s\S]*$/, '\n') + "$wgDefaultSkin = 'timeless';\n";
+      fs.writeFileSync(getPaths().localSettings, own);
+      fs.rmSync(settingsPath());
+
+      await startServers();
+
+      const settings = fs.readFileSync(getPaths().localSettings, 'utf8');
+      expect(settings.startsWith(own.trimEnd())).to.be.true;
+      expect(settings).to.include(`require_once "$IP/${wikiSettings.SETTINGS_FILE}";`);
+      expect(fs.existsSync(settingsPath())).to.be.true;
+      expect(updates()).to.equal(1);
+    });
+
+    it('should respect a user who switched the settings file off', async function() {
+      await installMediaWiki(VALID_CONFIG);
+      const switchedOff = fs.readFileSync(getPaths().localSettings, 'utf8').replace('require_once', '# require_once');
+      fs.writeFileSync(getPaths().localSettings, switchedOff);
+
+      await startServers();
+
+      expect(fs.readFileSync(getPaths().localSettings, 'utf8')).to.equal(switchedOff);
+    });
+
+    it('should not start the wiki while the schema update fails, and retry on the next start', async function() {
+      await installMediaWiki(VALID_CONFIG);
+      process.env.FAKE_PHP_UPDATE_FAILS = '1';
+      let error;
+      try {
+        error = await startServers().then(() => null, failure => failure);
+      } finally {
+        delete process.env.FAKE_PHP_UPDATE_FAILS;
+      }
+
+      expect(error.message).to.include('update.php').and.to.include('table mw_fake is broken');
+      expect(getStatus().running).to.be.false;
+      expect(fs.existsSync(getPaths().runStateFile)).to.be.false;
+      expect(stamp()).to.be.null;
+
+      await startServers();
+      expect(updates()).to.equal(2);
+      expect(stamp()).to.not.be.null;
     });
   });
 });

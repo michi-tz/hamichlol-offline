@@ -10,6 +10,7 @@ const mysql = require('mysql2/promise');
 const { DOWNLOADS, MEDIAWIKI_BRANCH } = require('./versions');
 const systemTools = require('./system-tools');
 const adminValidation = require('./admin-validation');
+const wikiSettings = require('./wiki-settings');
 
 // Network settings. Everything binds to the loopback interface only.
 const LOOPBACK_HOST = '127.0.0.1';
@@ -1338,6 +1339,8 @@ async function installMediaWiki(rawConfig) {
   }
 
   patchLocalSettings(localSettings);
+  // The extensions' schema update runs on the first start (syncWikiSettings)
+  wikiSettings.writeSettings(mediaWikiPath);
   console.log('MediaWiki installed successfully');
   return true;
 }
@@ -1392,6 +1395,8 @@ async function startServers() {
 
     return { phpPort, mysqlPort };
   }
+
+  await syncWikiSettings();
 
   const mysqlWasRunning = mysqlProcess !== null;
   await startMysql();
@@ -1733,6 +1738,7 @@ async function runSchemaUpdate(php) {
   const runner = path.join(mediaWikiPath, 'maintenance', 'run.php');
   // maintenance/run.php exists since MediaWiki 1.40; update.php runs by itself before that
   const script = fs.existsSync(runner) ? [runner, 'update'] : [path.join(mediaWikiPath, 'maintenance', 'update.php')];
+  const mysqlWasRunning = mysqlProcess !== null;
   await startMysql();
   try {
     const output = await run(php.exe, phpArgs(php, [...script, '--quick']), {
@@ -1749,12 +1755,30 @@ async function runSchemaUpdate(php) {
   } finally {
     // A failure to stop is not swallowed: the database copy must not be put
     // back under a running server
-    try {
-      await stopMysql();
-    } finally {
-      writeRunState();
+    if (!mysqlWasRunning) {
+      try {
+        await stopMysql();
+      } finally {
+        writeRunState();
+      }
     }
   }
+}
+
+// Bring the app's settings file (wiki-settings.js) of the installed wiki up
+// to date, and run the schema update when its content changed since the last
+// successful one: an extension the app enables may add tables. update.php is
+// idempotent, so a run that failed or was cut off is simply repeated on the
+// next start; until it succeeds the wiki is not started.
+async function syncWikiSettings() {
+  const { mediaWikiPath } = getPaths();
+  const { hash, schemaUpToDate } = wikiSettings.writeSettings(mediaWikiPath);
+  if (schemaUpToDate) {
+    return;
+  }
+  console.log('The extensions or settings changed: running update.php...');
+  await runSchemaUpdate(requirePhp());
+  wikiSettings.writeSchemaStamp(mediaWikiPath, hash);
 }
 
 // Upgrade the installed wiki to the MediaWiki version of versions.js.
@@ -1807,6 +1831,9 @@ async function upgradeMediaWiki() {
       await downloadAndExtract(DOWNLOADS.mediawiki.urls, paths.mediaWikiNew, { stripRootFolder: true });
       checkNewMediaWiki(paths.mediaWikiNew, from, php, localSettingsSource);
       await carryOverWikiFiles(paths.mediaWikiPath, paths.mediaWikiNew);
+      // The app's settings as they are for the new release; update.php then
+      // also creates what the extensions enabled there need
+      const settings = wikiSettings.writeSettings(paths.mediaWikiNew);
       await backupDatabase();
 
       await enter('swap');
@@ -1816,6 +1843,7 @@ async function upgradeMediaWiki() {
       await enter('update');
       console.log('Running update.php...');
       await runSchemaUpdate(php);
+      wikiSettings.writeSchemaStamp(paths.mediaWikiPath, settings.hash);
 
       await enter('cleanup');
     } catch (error) {

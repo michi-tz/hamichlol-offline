@@ -16,13 +16,35 @@ const { describe, it, before, after } = require('mocha');
 const { expect } = require('chai');
 const fs = require('fs');
 const path = require('path');
-const { spawn } = require('child_process');
+const { spawn, execFileSync } = require('child_process');
 
 const { makeTempDir, removeDir, isAlive, waitFor, readJson, setEnv, skipUnlessRequired } = require('../helpers');
 const systemTools = require('../../src/system-tools');
 const serverManager = require('../../src/server-manager');
 
 const { setDataPath, getPaths, getStatus, downloadServers, installMediaWiki, startServers, stopServers } = serverManager;
+
+// A tiny page that needs each of the main extensions the app enables
+const FIXTURE = {
+  module: ['יחידה:בדיקת מערכת', [
+    'local p = {}',
+    'function p.hello( frame )',
+    "\treturn 'שלום ' .. frame.args[1] .. ' ' .. mw.ustring.len( 'אבג' )",
+    'end',
+    'return p',
+    ''
+  ].join('\n')],
+  styles: ['תבנית:בדיקת מערכת/סגנון.css', '.hamichlol-system-test { color: #123456; }'],
+  page: ['בדיקת מערכת', [
+    '{{#invoke:בדיקת מערכת|hello|עולם}}',
+    '{{#תנאי:כן|פונקציית-תנאי}} {{#expr: 6 * 7}}',
+    'טקסט<ref>הערת בדיקה</ref>',
+    '<templatestyles src="תבנית:בדיקת מערכת/סגנון.css"/><span class="hamichlol-system-test">מעוצב</span>',
+    '<math>\\sqrt{x^2}</math>',
+    '<references/>',
+    ''
+  ].join('\n')]
+};
 
 const CONFIG = {
   dbName: 'hamichlol_test',
@@ -158,6 +180,45 @@ describe('Real installed software', function() {
     expect(query.general.lang).to.equal('he');
     // The address is detected from the request, not fixed at install time
     expect(query.general.server).to.equal(`http://127.0.0.1:${ports.phpPort}`);
+  });
+
+  it('should enable the bundled extensions and the site\'s namespaces', async function() {
+    const { query } = await api('action=query&meta=siteinfo&siprop=general|namespaces|namespacealiases|extensions&formatversion=2');
+
+    const extensions = query.extensions.map(extension => extension.name);
+    for (const name of ['ParserFunctions', 'Scribunto', 'Cite', 'TemplateStyles', 'Math', 'TemplateData', 'VisualEditor']) {
+      expect(extensions, name).to.include(name);
+    }
+    expect(extensions).to.not.include('Echo');
+    expect(query.namespaces['4'].name).to.equal('המכלול');
+    expect(query.namespaces['4000'].name).to.equal('פורטל');
+    // The project namespace's name from the installation still works
+    expect(query.namespacealiases).to.deep.include({ id: 4, alias: CONFIG.wikiName });
+    expect(query.general.timezone).to.equal('Asia/Jerusalem');
+  });
+
+  it('should render a Lua module, a parser function, a reference, a style sheet and a formula', async function() {
+    const mediaWikiPath = getPaths().mediaWikiPath;
+    for (const [title, text] of Object.values(FIXTURE)) {
+      execFileSync(systemTools.findSystemPhp().exe, [path.join(mediaWikiPath, 'maintenance', 'run.php'), 'edit', '--user', CONFIG.adminUser, title], {
+        cwd: mediaWikiPath,
+        input: text,
+        env: { ...process.env, HAMICHLOL_DB_PORT: String(ports.mysqlPort) }
+      });
+    }
+
+    const { parse } = await api(`action=parse&prop=text|categories&formatversion=2&page=${encodeURIComponent(FIXTURE.page[0])}`);
+    const html = parse.text;
+
+    expect(html, 'Lua').to.include('שלום עולם 3');
+    expect(html, 'ParserFunctions').to.include('פונקציית-תנאי').and.to.include('42');
+    expect(html, 'Cite').to.match(/<sup [^>]*class="reference"/).and.to.match(/<ol class="references">[\s\S]*הערת בדיקה/);
+    expect(html, 'TemplateStyles').to.match(/<style data-mw-deduplicate="TemplateStyles:r\d+">[^<]*\.hamichlol-system-test\{color:#123456\}/);
+    expect(html, 'Math').to.include('<math xmlns="http://www.w3.org/1998/Math/MathML"').and.to.include('<msqrt>');
+    expect(html).to.not.match(/class="[^"]*\b(error|scribunto-error)\b/);
+    expect(html).to.not.include('{{#');
+    // No tracking category of a failed script, style sheet or formula
+    expect(parse.categories).to.deep.equal([]);
   });
 
   it('should have created the administrator account', async function() {

@@ -320,6 +320,10 @@ describe('Real mode with fake servers', function() {
     fs.mkdirSync(mediaWikiPath, { recursive: true });
     fs.writeFileSync(path.join(mediaWikiPath, 'index.php'), '');
     fs.writeFileSync(localSettings, '');
+    // The app's settings are in place and the schema update already ran for
+    // them (this PHP stand-in can only serve pages)
+    const settings = require('../src/wiki-settings');
+    settings.writeSchemaStamp(mediaWikiPath, settings.writeSettings(mediaWikiPath).hash);
   });
 
   after(async function() {

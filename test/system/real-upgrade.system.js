@@ -170,6 +170,17 @@ describe('Real upgrade of an installed wiki', function() {
     expect(await page.text()).to.include('תוכן שנכתב בגרסה הישנה');
   });
 
+  it('should run Lua modules from the extracted release', async function() {
+    // The release was unpacked from its zip, which loses the executable bit of
+    // the Lua interpreter bundled with Scribunto; the app restores it
+    maintenance(['edit', '--user', CONFIG.adminUser, 'יחידה:אחרי השדרוג'], "return { hi = function () return 'לואה ' .. _VERSION end }\n");
+    maintenance(['edit', '--user', CONFIG.adminUser, 'אחרי השדרוג'], '{{#invoke:אחרי השדרוג|hi}}');
+
+    const { parse } = await api(`action=parse&prop=text&formatversion=2&page=${encodeURIComponent('אחרי השדרוג')}`);
+    expect(parse.text).to.include('לואה Lua 5.1');
+    expect(parse.text).to.not.include('scribunto-error');
+  });
+
   it('should let the administrator log in after the upgrade', async function() {
     const base = `http://127.0.0.1:${ports.phpPort}/api.php`;
     const tokenResponse = await fetch(`${base}?format=json&action=query&meta=tokens&type=login`);

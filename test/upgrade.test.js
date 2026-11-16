@@ -30,6 +30,7 @@ const {
 } = require('./helpers');
 const { DOWNLOADS } = require('../src/versions');
 const serverManager = require('../src/server-manager');
+const wikiSettings = require('../src/wiki-settings');
 
 const { setDataPath, getPaths, getStatus, installMediaWiki, upgradeMediaWiki, recoverInterruptedUpgrade, startServers, stopServers } = serverManager;
 
@@ -261,6 +262,50 @@ describe('Upgrading an installed wiki', function() {
 
       // The same file content, without copying it
       expect(fs.statSync(upload).ino).to.equal(inode);
+    });
+  });
+
+  describe('The app\'s extensions and settings', function() {
+    // A wiki installed by an earlier version of the app: no settings file and
+    // no include line, as the 1.43 wikis out there are
+    function asInstalledByEarlierVersion() {
+      const { localSettings, mediaWikiPath } = getPaths();
+      const source = fs.readFileSync(localSettings, 'utf8').replace(/\n# Added by Hamichlol Offline: extensions[\s\S]*$/, '\n');
+      fs.writeFileSync(localSettings, source);
+      fs.rmSync(path.join(mediaWikiPath, wikiSettings.SETTINGS_FILE), { force: true });
+      return source;
+    }
+
+    it('should be written for the new release and covered by the upgrade\'s schema update', async function() {
+      const own = asInstalledByEarlierVersion();
+
+      await upgradeMediaWiki();
+
+      const { mediaWikiPath, localSettings } = getPaths();
+      const settings = fs.readFileSync(path.join(mediaWikiPath, wikiSettings.SETTINGS_FILE), 'utf8');
+      // The new release's extensions (its zip has Cite)
+      expect(settings).to.equal(wikiSettings.buildSettings(mediaWikiPath));
+      expect(settings).to.include("'Cite',");
+      const local = fs.readFileSync(localSettings, 'utf8');
+      expect(local.startsWith(own.trimEnd())).to.be.true;
+      expect(local).to.include(`require_once "$IP/${wikiSettings.SETTINGS_FILE}";`);
+      expect(wikiSettings.readSchemaStamp(mediaWikiPath)).to.equal(wikiSettings.settingsHash(settings));
+      expect(queries().filter(sql => sql === UPDATE_QUERY)).to.have.lengthOf(1);
+
+      // update.php ran during the upgrade, so the first start does not repeat it
+      await startServers();
+      expect(queries().filter(sql => sql === UPDATE_QUERY)).to.have.lengthOf(1);
+    });
+
+    it('should leave the old wiki without them when the upgrade fails', async function() {
+      asInstalledByEarlierVersion();
+      const before = snapshot();
+      process.env.FAKE_PHP_UPDATE_FAILS = '1';
+
+      await failure(upgradeMediaWiki());
+
+      expect(snapshot()).to.deep.equal(before);
+      expect(fs.existsSync(path.join(getPaths().mediaWikiPath, wikiSettings.SETTINGS_FILE))).to.be.false;
     });
   });
 
