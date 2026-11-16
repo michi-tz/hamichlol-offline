@@ -60,6 +60,7 @@ if (args[0] === '-r') {
       dbPort: process.env.HAMICHLOL_DB_PORT || null,
       docroot: valueAfter('-t'),
       ini: valueAfter('-c'),
+      args,
       cwd: process.cwd(),
       url: request.url
     }));
