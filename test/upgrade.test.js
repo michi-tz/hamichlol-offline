@@ -161,7 +161,7 @@ describe('Upgrading an installed wiki', function() {
   afterEach(async function() {
     await stopServers();
     DOWNLOADS.mediawiki.urls = savedUrls;
-    for (const name of ['FAKE_PHP_UPDATE_FAILS', 'FAKE_PHP_UPDATE_HANGS']) {
+    for (const name of ['FAKE_PHP_UPDATE_FAILS', 'FAKE_PHP_UPDATE_HANGS', 'FAKE_PHP_UPDATE_THEN_MKDIR']) {
       delete process.env[name];
     }
     restoreEnv();
@@ -293,6 +293,83 @@ describe('Upgrading an installed wiki', function() {
 
       await upgradeMediaWiki();
       expect(version()).to.equal(NEW_VERSION);
+    });
+
+    it('should restore the database too when the journal of the last phase cannot be written', async function() {
+      const before = snapshot();
+      // update.php succeeds, then a folder in the way makes the "cleanup" journal unwritable
+      process.env.FAKE_PHP_UPDATE_THEN_MKDIR = `${getPaths().upgradeJournal}.tmp`;
+
+      const error = await failure(upgradeMediaWiki());
+
+      expect(error).to.be.an('error');
+      expect(error.message).to.include(`הוויקי נשאר בגרסה ${OLD_VERSION}`);
+      const after = snapshot();
+      expect(after).to.deep.equal(before);
+      // Old code with the old database: the update's change is gone
+      expect(after.queries).to.not.include(UPDATE_QUERY);
+      expect(leftovers()).to.deep.equal([]);
+    });
+
+    it('should stop a database server left by a crashed run before copying the database', async function() {
+      const { mariadbDir, dbDataDir, runStateFile } = getPaths();
+      const exe = path.join(mariadbDir, 'bin', 'mariadbd.exe');
+      const marker = `--datadir=${dbDataDir}`;
+      const port = await require('portfinder').getPortPromise({ port: 33306 });
+      const stale = spawn(exe, ['--no-defaults', marker, `--port=${port}`, '--bind-address=127.0.0.1'], { stdio: 'ignore' });
+      try {
+        expect(await waitFor(() => fs.existsSync(path.join(dbDataDir, 'args.json')))).to.be.true;
+        fs.writeFileSync(runStateFile, JSON.stringify({ mysql: { pid: stale.pid, port, exe, marker } }));
+        // The download fails, so the upgrade never gets as far as starting its
+        // own database server: only a check before the copy stops the stale one
+        delete files['/mediawiki.zip'];
+
+        const error = await failure(upgradeMediaWiki());
+
+        expect(error.message).to.include('404');
+        expect(await waitFor(() => !isAlive(stale.pid))).to.be.true;
+        expect(fs.existsSync(runStateFile)).to.be.false;
+
+        files['/mediawiki.zip'] = releaseZip(NEW_VERSION);
+        await upgradeMediaWiki();
+        expect(version()).to.equal(NEW_VERSION);
+      } finally {
+        if (isAlive(stale.pid)) {
+          stale.kill('SIGKILL');
+        }
+      }
+    });
+
+    it('should refuse, changing nothing, while a stale database server cannot be stopped', async function() {
+      const { mariadbDir, dbDataDir, runStateFile } = getPaths();
+      const exe = path.join(mariadbDir, 'bin', 'mariadbd.exe');
+      // A process that is alive but whose command line cannot be read: it is
+      // neither confirmed as ours nor as gone, so it is left alone
+      const pid = 4194000;
+      fs.writeFileSync(runStateFile, JSON.stringify({ mysql: { pid, port: 1, exe, marker: `--datadir=${dbDataDir}` } }));
+      const before = snapshot();
+      const realKill = process.kill;
+      process.kill = (target, signal) => {
+        if (target === pid) {
+          const error = new Error('Operation not permitted');
+          error.code = 'EPERM';
+          throw error;
+        }
+        return realKill.call(process, target, signal);
+      };
+      let error;
+      try {
+        error = await failure(upgradeMediaWiki());
+      } finally {
+        process.kill = realKill;
+      }
+
+      expect(error.message).to.include('שרת מסד נתונים מהפעלה קודמת');
+      expect(requests).to.deep.equal([]);
+      expect(snapshot()).to.deep.equal(before);
+      expect(leftovers()).to.deep.equal([]);
+      expect(readJson(runStateFile).mysql.pid).to.equal(pid);
+      fs.rmSync(runStateFile);
     });
 
     it('should keep the old wiki when the download fails', async function() {

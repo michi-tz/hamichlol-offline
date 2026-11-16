@@ -20,6 +20,8 @@
 //   FAKE_PHP_UPDATE_FAILS    the schema update changes the database, then fails
 //   FAKE_PHP_UPDATE_HANGS    the schema update changes the database, then waits
 //                            until the database server goes away
+//   FAKE_PHP_UPDATE_THEN_MKDIR  after a successful schema update, create this
+//                            folder (e.g. to make a later file write fail)
 
 const fs = require('fs');
 const http = require('http');
@@ -84,6 +86,9 @@ if (args[0] === '-r') {
     if (process.env.FAKE_PHP_UPDATE_FAILS) {
       console.error('Fake updater error: table mw_fake is broken');
       process.exit(1);
+    }
+    if (process.env.FAKE_PHP_UPDATE_THEN_MKDIR) {
+      fs.mkdirSync(process.env.FAKE_PHP_UPDATE_THEN_MKDIR, { recursive: true });
     }
     console.log('Done.');
   });

@@ -1783,13 +1783,22 @@ async function upgradeMediaWiki() {
 
   const php = requirePhp();
   requireDatabase();
+  // A database server left running by a crashed earlier run would keep
+  // changing the files the backup copies; the app starts this clean-up
+  // without waiting for it, so it is done (again) here before anything is copied
+  await cleanupStaleProcesses();
+  if (readRunState().mysql) {
+    throw new Error('שרת מסד נתונים מהפעלה קודמת של האפליקציה עדיין פועל ולא ניתן לעצור אותו, ולכן לא ניתן לשדרג את MediaWiki. יש לסגור את האפליקציה ולפתוח אותה שוב');
+  }
   const localSettingsSource = fs.readFileSync(paths.localSettings, 'utf8');
 
   upgrading = true;
   let phase = 'prepare';
+  // The phase advances only once its journal is on disk: a failed write is
+  // undone as the phase before it, which is what the journal still says
   const enter = async next => {
+    await writeUpgradeJournal({ from, to, phase: next });
     phase = next;
-    await writeUpgradeJournal({ from, to, phase });
   };
   try {
     try {
