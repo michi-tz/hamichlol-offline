@@ -1157,7 +1157,10 @@ async function checkForPhpUpdate(now) {
 
   const latest = await readPhpReleases();
   fs.writeFileSync(stateFile, JSON.stringify({ checkedAt: now }));
-  if (systemTools.compareVersions(latest.version, php.version) <= 0) {
+  // Never a release older than the pinned one, even from a list that lags
+  // behind, and nothing that is not newer than the one in use
+  if (systemTools.compareVersions(latest.version, DOWNLOADS.php.version) < 0 ||
+      systemTools.compareVersions(latest.version, php.version) <= 0) {
     return null;
   }
   const target = path.join(getPaths().serverPath, `php-${latest.version}`);

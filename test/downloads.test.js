@@ -848,6 +848,20 @@ describe('Downloads', function() {
         expect(getStatus().downloaded).to.be.true;
       });
 
+      it('should never update to a release older than the pinned one', async function() {
+        // An install on an older release, and a list that lags behind the pin
+        const [major, minor, patch] = pinned().split('.').map(Number);
+        const installed = `${major}.${minor}.${patch - 2}`;
+        const lagging = `${major}.${minor}.${patch - 1}`;
+        fs.renameSync(getPaths().phpDir, path.join(getPaths().serverPath, `php-${installed}`));
+        publish(lagging);
+
+        expect(await updateAsWindows()).to.be.null;
+
+        expect(requests).to.deep.equal(['/releases.json']);
+        expect(getPaths().phpVersion).to.equal(installed);
+      });
+
       it('should leave a PHP the app did not download alone', async function() {
         publish(newer());
         fs.rmSync(getPaths().phpDir, { recursive: true });

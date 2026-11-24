@@ -31,7 +31,8 @@ async function printVersions() {
 
 async function download(dataDir) {
   serverManager.setDataPath(path.resolve(dataDir));
-  if (!fs.existsSync(serverManager.getPaths().phpIni)) {
+  const php = serverManager.getPaths();
+  if (!fs.existsSync(php.phpExe) || !fs.existsSync(php.phpIni)) {
     await downloadPhp();
   }
   const { phpExe, mariadbDir } = serverManager.getPaths();
