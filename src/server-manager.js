@@ -1285,8 +1285,10 @@ async function checkForPhpUpdate(now) {
     return null;
   }
 
-  const latest = await readPhpReleases();
+  // Recorded before the list is read: a computer without internet, or a list
+  // or file that cannot be used, is tried again a day later, not at every start
   fs.writeFileSync(stateFile, JSON.stringify({ checkedAt: now }));
+  const latest = await readPhpReleases();
   // Never a release older than the pinned one, even from a list that lags
   // behind, and nothing that is not newer than the one in use
   if (systemTools.compareVersions(latest.version, DOWNLOADS.php.version) < 0 ||
