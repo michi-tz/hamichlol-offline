@@ -120,6 +120,15 @@ const VALID_CONFIG = {
   adminPassword: 'admin-password-123'
 };
 
+// No test reaches the internet: the app's own downloads may only go to the
+// local test servers (127.0.0.1). Anything else fails at once, as offline.
+require('../src/server-manager').setFetch((url, options) => {
+  if (!/^http:\/\/127\.0\.0\.1[:/]/.test(String(url))) {
+    return Promise.reject(new Error(`Tests do not download from the internet: ${url}`));
+  }
+  return fetch(url, options);
+});
+
 module.exports = {
   FAKE_PHP,
   FAKE_DB_SERVER,

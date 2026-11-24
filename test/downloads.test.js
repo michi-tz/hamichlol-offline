@@ -43,6 +43,7 @@ describe('Downloads', function() {
   let truncated;   // URL paths whose download is cut off half-way
   let restoreEnv;
   let savedUrls;
+  let savedPhpReleases;
 
   before(async function() {
     server = http.createServer((request, response) => {
@@ -88,6 +89,9 @@ describe('Downloads', function() {
     for (const [name, entry] of Object.entries(DOWNLOADS)) {
       savedUrls[name] = entry.urls;
     }
+    savedPhpReleases = DOWNLOADS.php.releases;
+    // Most tests are about the pinned release; the list is tested on its own below
+    DOWNLOADS.php.releases = null;
   });
 
   afterEach(async function() {
@@ -95,6 +99,7 @@ describe('Downloads', function() {
     for (const [name, urls] of Object.entries(savedUrls)) {
       DOWNLOADS[name].urls = urls;
     }
+    DOWNLOADS.php.releases = savedPhpReleases;
     restoreEnv();
     removeDir(tempDir);
   });
@@ -640,6 +645,126 @@ describe('Downloads', function() {
       } finally {
         DOWNLOADS.mariadb.version = savedVersion;
       }
+    });
+
+    // The newest release of the PHP branch, from the list windows.php.net publishes
+    describe('The newest PHP release', function() {
+      const pinned = () => DOWNLOADS.php.version;
+      const newer = () => `${pinned().split('.').slice(0, 2).join('.')}.99`;
+      const zipName = version => `php-${version}-Win32-vs16-x64.zip`;
+      const sha256 = buffer => require('crypto').createHash('sha256').update(buffer).digest('hex');
+
+      function publish(version, { file = zipName(version), hash } = {}) {
+        files[`/${zipName(version)}`] = files['/php.zip'];
+        const branch = version.split('.').slice(0, 2).join('.');
+        files['/releases.json'] = Buffer.from(JSON.stringify({
+          [branch]: {
+            version,
+            'nts-vs16-x64': { zip: { path: `php-${version}-nts-Win32-vs16-x64.zip`, sha256: 'f'.repeat(64) } },
+            'ts-vs16-x64': { zip: { path: file, sha256: hash || sha256(files['/php.zip']) } }
+          }
+        }));
+        DOWNLOADS.php.releases = `${baseUrl}/releases.json`;
+      }
+
+      it('should download the newest release of the branch, checked against its SHA-256', async function() {
+        publish(newer());
+
+        await downloadAsWindows();
+
+        expect(requests).to.include('/releases.json').and.to.include(`/${zipName(newer())}`);
+        expect(requests).to.not.include('/php.zip');
+        expect(path.basename(getPaths().phpDir)).to.equal(`php-${newer()}`);
+        expect(getStatus().tools.php).to.include({ source: 'bundled', version: newer(), path: getPaths().phpExe });
+        const ini = fs.readFileSync(getPaths().phpIni, 'utf8');
+        expect(ini).to.include(`extension_dir = "${path.join(getPaths().phpDir, 'ext')}"`);
+      });
+
+      it('should fall back to the pinned release when the file does not match its SHA-256', async function() {
+        publish(newer(), { hash: '0'.repeat(64) });
+
+        await downloadAsWindows();
+
+        expect(requests).to.include(`/${zipName(newer())}`).and.to.include('/php.zip');
+        expect(fs.readdirSync(getPaths().serverPath)).to.not.include(`php-${newer()}`);
+        expect(path.basename(getPaths().phpDir)).to.equal(`php-${pinned()}`);
+        expect(getStatus().downloaded).to.be.true;
+      });
+
+      it('should fall back to the pinned release when the list cannot be read', async function() {
+        DOWNLOADS.php.releases = `${baseUrl}/releases.json`;
+
+        await downloadAsWindows();
+
+        expect(requests).to.include('/releases.json').and.to.include('/php.zip');
+        expect(path.basename(getPaths().phpDir)).to.equal(`php-${pinned()}`);
+      });
+
+      it('should use nothing from a list that does not look as expected', async function() {
+        const cases = {
+          'a version that is not a release number': list => { Object.values(list)[0].version = `${newer()}/../../x`; },
+          'a file in another folder': list => { Object.values(list)[0]['ts-vs16-x64'].zip.path = `../${zipName(newer())}`; },
+          'the file of another version': list => { Object.values(list)[0]['ts-vs16-x64'].zip.path = zipName('9.9.9'); },
+          'no checksum': list => { delete Object.values(list)[0]['ts-vs16-x64'].zip.sha256; }
+        };
+        for (const [name, change] of Object.entries(cases)) {
+          publish(newer());
+          const list = JSON.parse(files['/releases.json']);
+          change(list);
+          files['/releases.json'] = Buffer.from(JSON.stringify(list));
+          removeDir(getPaths().serverPath);
+          requests.length = 0;
+
+          await downloadAsWindows();
+
+          expect(requests, name).to.not.include(`/${zipName(newer())}`);
+          expect(path.basename(getPaths().phpDir), name).to.equal(`php-${pinned()}`);
+        }
+      });
+
+      it('should never download a release older than the pinned one', async function() {
+        const older = `${pinned().split('.').slice(0, 2).join('.')}.0`;
+        publish(older);
+
+        await downloadAsWindows();
+
+        expect(requests).to.not.include(`/${zipName(older)}`);
+        expect(path.basename(getPaths().phpDir)).to.equal(`php-${pinned()}`);
+      });
+
+      it('should run the newest complete PHP folder of the branch', function() {
+        const [major, minor, patch] = pinned().split('.').map(Number);
+        const release = offset => `${major}.${minor}.${patch + offset}`;
+        const make = (name, complete = true) => {
+          const dir = path.join(getPaths().serverPath, name);
+          fs.mkdirSync(dir, { recursive: true });
+          fs.writeFileSync(path.join(dir, 'php.exe'), 'MZ');
+          if (complete) {
+            fs.writeFileSync(path.join(dir, 'php.ini'), '');
+          }
+        };
+        make(`php-${pinned()}`);
+        make(`php-${release(9)}`);
+        // Higher numbers, as text and as versions, that must not be picked:
+        // unpacking not finished, a partial download, another branch
+        make(`php-${release(10)}`, false);
+        make(`php-${release(11)}.partial`);
+        make(`php-${major}.${minor + 1}.0`);
+
+        expect(getPaths().phpVersion).to.equal(release(9));
+        expect(getStatus().tools.php.version).to.equal(release(9));
+      });
+
+      it('should not run a folder older than the pinned release', function() {
+        const [major, minor] = pinned().split('.');
+        const dir = path.join(getPaths().serverPath, `php-${major}.${minor}.0`);
+        fs.mkdirSync(dir, { recursive: true });
+        fs.writeFileSync(path.join(dir, 'php.exe'), 'MZ');
+        fs.writeFileSync(path.join(dir, 'php.ini'), '');
+
+        expect(getPaths().phpVersion).to.equal(pinned());
+        expect(getStatus().downloaded).to.be.false;
+      });
     });
 
     it('should refuse to download server programs on other systems', async function() {
