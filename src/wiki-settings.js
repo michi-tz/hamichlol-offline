@@ -302,8 +302,10 @@ const LUA_QUOTES_MARKER = '// hamichlol-offline: PHP 8 quotes the command for cm
 // Remove that statement from the MediaWiki tree in `mediaWikiDir` (Windows
 // only). Only the exact statement is touched, and only when it occurs once;
 // anything else is left as it is and logged, so a Scribunto that changed is
-// never edited blindly. Returns 'fixed', 'already-fixed', 'not-needed' (not
-// Windows), 'no-scribunto' or 'unrecognised'.
+// never edited blindly. A file that cannot be written is logged, never thrown:
+// the wiki then starts with modules failing, rather than not at all. Returns
+// 'fixed', 'already-fixed', 'not-needed' (not Windows), 'no-scribunto',
+// 'unrecognised' or 'failed'.
 function fixWindowsLuaLaunch(mediaWikiDir, platform = process.platform) {
   if (platform !== 'win32') {
     return 'not-needed';
@@ -320,7 +322,13 @@ function fixWindowsLuaLaunch(mediaWikiDir, platform = process.platform) {
     console.warn(`Scribunto's Lua launch code is not as expected; leaving ${LUA_INTERPRETER_FILE} as it is`);
     return 'unrecognised';
   }
-  replaceFile(file, source.replace(LUA_EXTRA_QUOTES, () => LUA_QUOTES_MARKER));
+  try {
+    replaceFile(file, source.replace(LUA_EXTRA_QUOTES, () => LUA_QUOTES_MARKER));
+  } catch (error) {
+    // E.g. a file an antivirus keeps locked: modules fail, but the wiki still starts
+    console.error(`Could not fix how Scribunto starts Lua (${LUA_INTERPRETER_FILE}): ${error.message}`);
+    return 'failed';
+  }
   return 'fixed';
 }
 

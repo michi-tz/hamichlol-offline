@@ -366,6 +366,15 @@ describe('Starting Lua on Windows', function() {
       }
     });
 
+    it('should report a file it cannot write instead of throwing', function() {
+      write(ORIGINAL);
+      // The file is written aside first; a folder in that place makes it fail
+      fs.mkdirSync(`${interpreter()}.tmp`);
+
+      expect(fixWindowsLuaLaunch(mw, 'win32')).to.equal('failed');
+      expect(read()).to.equal(ORIGINAL);
+    });
+
     it('should do nothing without Scribunto', function() {
       expect(fixWindowsLuaLaunch(mw, 'win32')).to.equal('no-scribunto');
       expect(fs.existsSync(interpreter())).to.be.false;
