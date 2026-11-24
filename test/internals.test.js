@@ -793,8 +793,8 @@ describe('Server manager building blocks', function() {
       const twice = patch(once);
 
       expect(once).to.include('# Added by Hamichlol Offline: performance settings\n$wgUseFileCache = true;\n$wgFileCacheDirectory = "$IP/cache/html";');
-      // A change to the app's settings file throws the cached pages away
-      expect(once).to.include(`$wgCacheEpoch = max( $wgCacheEpoch, gmdate( 'YmdHis', (int)@filemtime( "$IP/HamichlolSettings.php" ) ) );`);
+      // Never for category and file pages, whose lists change without notice
+      expect(once).to.include("$wgHooks['HTMLFileCache::useFileCache'][] = static function ( $context ) {\n\treturn !in_array( $context->getTitle()->getNamespace(), [ NS_CATEGORY, NS_FILE ], true );\n};");
       expect(twice).to.equal(once);
       expect(twice.match(/^\$wgUseFileCache/gm)).to.have.lengthOf(1);
       // $wgJobRunRate was considered and deliberately left out

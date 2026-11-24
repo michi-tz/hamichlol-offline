@@ -805,10 +805,7 @@ const LOCAL_PATHS_SETTINGS = [
 ].join('\n');
 
 // MediaWiki's file cache serves anonymous page views as ready-made HTML files,
-// skipping PHP rendering and most database queries. MediaWiki throws them away
-// when LocalSettings.php changes, but the app's settings (extensions included)
-// live in a file of their own, so a change there moves the cache epoch too.
-// It is a separate block from
+// skipping PHP rendering and most database queries. It is a separate block from
 // the local paths so that existing installations can receive it when the servers
 // start (see applyPerformanceSettings).
 const PERFORMANCE_MARKER = '# Added by Hamichlol Offline: performance settings';
@@ -816,7 +813,11 @@ const PERFORMANCE_SETTINGS = [
   PERFORMANCE_MARKER,
   '$wgUseFileCache = true;',
   '$wgFileCacheDirectory = "$IP/cache/html";',
-  `$wgCacheEpoch = max( $wgCacheEpoch, gmdate( 'YmdHis', (int)@filemtime( "$IP/${wikiSettings.SETTINGS_FILE}" ) ) );`,
+  '// Category and file pages list other pages, and MediaWiki does not throw',
+  '// their cached copies away when those lists change',
+  "$wgHooks['HTMLFileCache::useFileCache'][] = static function ( $context ) {",
+  '\treturn !in_array( $context->getTitle()->getNamespace(), [ NS_CATEGORY, NS_FILE ], true );',
+  '};',
   ''
 ].join('\n');
 

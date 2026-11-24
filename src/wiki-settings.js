@@ -358,13 +358,24 @@ function writeSettings(mediaWikiDir) {
   const settingsFile = path.join(mediaWikiDir, SETTINGS_FILE);
   const localSettings = path.join(mediaWikiDir, 'LocalSettings.php');
   const content = buildSettings(mediaWikiDir);
-  if (readIfExists(settingsFile) !== content) {
+  const changed = readIfExists(settingsFile) !== content;
+  if (changed) {
     replaceFile(settingsFile, content);
   }
   const source = fs.readFileSync(localSettings, 'utf8');
   const patched = addInclude(source);
   if (patched !== source) {
     fs.writeFileSync(localSettings, patched);
+  } else if (changed) {
+    // MediaWiki throws its cached pages away when LocalSettings.php changes
+    // ($wgInvalidateCacheOnLocalSettingsChange), not when a file it includes
+    // does: its time is moved so that pages show the new settings
+    try {
+      const now = new Date();
+      fs.utimesSync(localSettings, now, now);
+    } catch (error) {
+      console.error(`Could not mark LocalSettings.php as changed: ${error.message}`);
+    }
   }
   prepareBundledPrograms(mediaWikiDir);
   const hash = settingsHash(content);

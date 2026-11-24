@@ -171,6 +171,22 @@ describe('App-managed wiki settings', function() {
       expect(loaded(settingsFile())).to.deep.equal(['Scribunto', 'Cite']);
     });
 
+    it('should move the time of LocalSettings.php when the settings change, so cached pages go', function() {
+      tree(['Cite']);
+      writeSettings(mw);
+      const local = path.join(mw, 'LocalSettings.php');
+      const past = new Date(Date.now() - 60 * 60 * 1000);
+      fs.utimesSync(local, past, past);
+      const before = fs.statSync(local).mtimeMs;
+
+      writeSettings(mw);
+      expect(fs.statSync(local).mtimeMs).to.equal(before);
+
+      tree(['Scribunto']);
+      writeSettings(mw);
+      expect(fs.statSync(local).mtimeMs).to.be.above(before);
+    });
+
     it('should replace a settings file the user edited', function() {
       tree(['Cite']);
       writeSettings(mw);
