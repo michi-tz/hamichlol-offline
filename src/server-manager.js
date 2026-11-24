@@ -1,3 +1,4 @@
+const crypto = require('crypto');
 const fs = require('fs');
 const os = require('os');
 const { EventEmitter } = require('events');
@@ -7,7 +8,7 @@ const { execFile, spawn } = require('child_process');
 const AdmZip = require('adm-zip');
 const portfinder = require('portfinder');
 const mysql = require('mysql2/promise');
-const { DOWNLOADS, MEDIAWIKI_BRANCH } = require('./versions');
+const { DOWNLOADS, MEDIAWIKI_BRANCH, PHP_BRANCH, phpZipName } = require('./versions');
 const systemTools = require('./system-tools');
 const adminValidation = require('./admin-validation');
 const wikiSettings = require('./wiki-settings');
@@ -22,6 +23,8 @@ const DEFAULT_MYSQL_PORT = 3306;
 const DB_PORT_ENV = 'HAMICHLOL_DB_PORT';
 
 const SERVER_START_TIMEOUT_MS = 60000;
+// How long the list of PHP releases may take; without it, the pinned release is used
+const PHP_RELEASES_TIMEOUT_MS = 15000;
 const MYSQL_SHUTDOWN_TIMEOUT_MS = 15000;
 const MYSQL_CONNECT_TIMEOUT_MS = 5000;
 const PROCESS_KILL_TIMEOUT_MS = 5000;
@@ -89,14 +92,39 @@ function setFetch(implementation) {
   fetchImpl = implementation;
 }
 
+// Downloaded PHP releases that can be used: complete folders (php.exe and the
+// php.ini written after unpacking) of the pinned branch, newest first. One
+// older than the pinned release still runs (a computer may be offline), and is
+// replaced by the next update.
+const PHP_DIR_RE = /^php-(\d+\.\d+\.\d+)$/;
+
+function usablePhpVersions(serverPath) {
+  let names;
+  try {
+    names = fs.readdirSync(serverPath);
+  } catch (error) {
+    return [];
+  }
+  return names
+    .map(name => PHP_DIR_RE.exec(name))
+    .filter(Boolean)
+    .map(match => match[1])
+    .filter(version => version.startsWith(`${PHP_BRANCH}.`))
+    .filter(version => ['php.exe', 'php.ini'].every(name => fs.existsSync(path.join(serverPath, `php-${version}`, name))))
+    .sort((a, b) => systemTools.compareVersions(b, a));
+}
+
 function getPaths() {
   const serverPath = path.join(dataPath, 'server');
-  const phpDir = path.join(serverPath, `php-${DOWNLOADS.php.version}`);
+  // The newest downloaded release; the pinned one until there is any
+  const phpVersion = usablePhpVersions(serverPath)[0] || DOWNLOADS.php.version;
+  const phpDir = path.join(serverPath, `php-${phpVersion}`);
   const mariadbDir = path.join(serverPath, `mariadb-${DOWNLOADS.mariadb.version}`);
   const mediaWikiPath = path.join(dataPath, 'mediawiki');
   return {
     dataPath,
     serverPath,
+    phpVersion,
     phpDir,
     phpExe: path.join(phpDir, 'php.exe'),
     phpIni: path.join(phpDir, 'php.ini'),
@@ -134,9 +162,9 @@ function useSystemTools() {
 // that is already installed on the computer. `problem` says why an installed
 // PHP was found but cannot be used.
 function resolvePhp() {
-  const { phpExe, phpIni, phpDir } = getPaths();
+  const { phpExe, phpIni, phpDir, phpVersion } = getPaths();
   if (fs.existsSync(phpExe) && fs.existsSync(phpIni)) {
-    return { source: 'bundled', exe: phpExe, ini: phpIni, cwd: phpDir, version: DOWNLOADS.php.version };
+    return { source: 'bundled', exe: phpExe, ini: phpIni, cwd: phpDir, version: phpVersion };
   }
   const found = useSystemTools() ? systemTools.findSystemPhp() : null;
   if (found && found.usable) {
@@ -907,7 +935,8 @@ async function removeQuietly(target) {
   }
 }
 
-async function downloadAndExtract(urls, targetDir, { stripRootFolder = false, prepare } = {}) {
+// With `sha256`, an archive whose checksum differs is rejected before anything is unpacked.
+async function downloadAndExtract(urls, targetDir, { stripRootFolder = false, prepare, sha256 } = {}) {
   const partialDir = `${targetDir}.partial`;
   // Left behind by earlier versions, which saved the archive before extracting it
   await removeQuietly(`${targetDir}.zip`);
@@ -916,6 +945,9 @@ async function downloadAndExtract(urls, targetDir, { stripRootFolder = false, pr
 
   try {
     const zipData = await downloadFirstAvailable(urls);
+    if (sha256 && crypto.createHash('sha256').update(zipData).digest('hex') !== sha256) {
+      throw new Error('הקובץ שהורד אינו תואם לסכום הביקורת (SHA-256) שפורסם');
+    }
     new AdmZip(zipData).extractAllTo(partialDir, true);
 
     let root = partialDir;
@@ -935,6 +967,240 @@ async function downloadAndExtract(urls, targetDir, { stripRootFolder = false, pr
   } finally {
     await removeQuietly(partialDir);
   }
+}
+
+// The newest release of the pinned PHP branch, from the list windows.php.net
+// publishes: { version, url, sha256 }. Throws when the list cannot be read or
+// does not look as expected; everything taken from it is checked, since it
+// decides what is downloaded and the name of the folder it goes to.
+async function readPhpReleases() {
+  const { releases, build } = DOWNLOADS.php;
+  if (!releases) {
+    throw new Error('no release list');
+  }
+  // Raced as well as aborted: not every fetch implementation honours the signal
+  const controller = new AbortController();
+  let timer;
+  const timeout = new Promise((resolve, reject) => {
+    timer = setTimeout(() => {
+      controller.abort();
+      reject(new Error('timed out'));
+    }, PHP_RELEASES_TIMEOUT_MS);
+  });
+  let list;
+  try {
+    const response = await Promise.race([fetchImpl(releases, { redirect: 'follow', signal: controller.signal }), timeout]);
+    if (!response.ok) {
+      throw new Error(`HTTP ${response.status}`);
+    }
+    list = JSON.parse(await Promise.race([response.text(), timeout]));
+  } finally {
+    clearTimeout(timer);
+  }
+  const entry = list && list[PHP_BRANCH];
+  const version = entry && entry.version;
+  const zip = entry && entry[build] && entry[build].zip;
+  if (typeof version !== 'string' || !new RegExp(`^${PHP_BRANCH.replace('.', '\\.')}\\.\\d{1,3}$`).test(version)) {
+    throw new Error(`no release of PHP ${PHP_BRANCH} in the list`);
+  }
+  if (!zip || zip.path !== phpZipName(version) || typeof zip.sha256 !== 'string' || !/^[0-9a-f]{64}$/i.test(zip.sha256)) {
+    throw new Error(`no ${build} file of PHP ${version} in the list`);
+  }
+  return { version, url: new URL(zip.path, releases).href, sha256: zip.sha256.toLowerCase() };
+}
+
+// readPhpReleases(), or null (logged) when the list cannot be used or offers
+// nothing newer than the pinned release
+async function latestPhpRelease() {
+  try {
+    const latest = await readPhpReleases();
+    return systemTools.compareVersions(latest.version, DOWNLOADS.php.version) >= 0 ? latest : null;
+  } catch (error) {
+    console.error(`Could not read the list of PHP releases: ${error.message}`);
+    return null;
+  }
+}
+
+function preparePhp(root, finalDir) {
+  configurePhpIni(root, finalDir);
+}
+
+// How a PHP release is checked to run; the unit tests, whose PHP folders hold
+// no real program, replace it
+let phpCheck = dir => phpRuns(dir);
+function setPhpCheck(check) {
+  phpCheck = check;
+}
+
+// Download the newest PHP release of the branch, or the pinned release when
+// that fails or does not run. Returns the version that was installed.
+async function downloadPhp() {
+  const { serverPath } = getPaths();
+  const latest = await latestPhpRelease();
+  if (latest && fs.existsSync(path.join(serverPath, `php-${latest.version}.failed`))) {
+    console.log(`PHP ${latest.version} did not start here before; downloading PHP ${DOWNLOADS.php.version}`);
+  } else if (latest) {
+    try {
+      console.log(`Downloading PHP ${latest.version}...`);
+      const dir = path.join(serverPath, `php-${latest.version}`);
+      await downloadAndExtract([latest.url], dir, { prepare: preparePhp, sha256: latest.sha256 });
+      if (!(await phpCheck(dir))) {
+        // Set aside only when the pinned release runs instead: when neither
+        // does, the computer is at fault (a missing runtime, say), not the release
+        await recoverFromFailedPhp(latest.version, new Error('php -v failed'));
+      }
+      return getPaths().phpVersion;
+    } catch (error) {
+      console.error(`PHP ${latest.version} could not be downloaded (${error.message}); downloading PHP ${DOWNLOADS.php.version}`);
+    }
+  }
+  console.log(`Downloading PHP ${DOWNLOADS.php.version}...`);
+  await downloadAndExtract(DOWNLOADS.php.urls, path.join(serverPath, `php-${DOWNLOADS.php.version}`), { prepare: preparePhp });
+  return DOWNLOADS.php.version;
+}
+
+// A release downloaded next to the one in use, which serves the wiki, is
+// checked before it can run it: one whose php.exe does not run here is
+// renamed to "<folder>.failed" at once, so that no start ever picks it.
+// Returns whether it runs.
+async function setAsideUnlessRuns(dir) {
+  if (await phpCheck(dir)) {
+    return true;
+  }
+  fs.rmSync(`${dir}.failed`, { recursive: true, force: true });
+  fs.renameSync(dir, `${dir}.failed`);
+  return false;
+}
+
+// Whether the PHP in `dir` runs at all, with its own php.ini
+async function phpRuns(dir) {
+  try {
+    await run(path.join(dir, 'php.exe'), ['-c', path.join(dir, 'php.ini'), '-v'], { cwd: dir, timeout: 15000 });
+    return true;
+  } catch (error) {
+    return false;
+  }
+}
+
+// When the PHP release that runs could not be started: if the release itself
+// is at fault (its php.exe does not even run; a taken port or a slow start is
+// not its fault), it is renamed to "<folder>.failed", so that it is neither
+// run nor downloaded again, and a release that does run takes its place: the
+// one before it, or else the pinned release, downloaded first. Nothing is
+// renamed until that other release has been checked, so a computer that is
+// offline, or where no release runs, keeps what it has. Returns whether
+// another release is ready to be started.
+async function recoverFromFailedPhp(version, error, runs = phpCheck) {
+  const { serverPath } = getPaths();
+  const versions = usablePhpVersions(serverPath);
+  const dirOf = release => path.join(serverPath, `php-${release}`);
+  if (versions[0] !== version || await runs(dirOf(version))) {
+    return false;
+  }
+
+  let replacement = versions[1];
+  if (!replacement) {
+    const pinned = DOWNLOADS.php.version;
+    if (version === pinned || !canDownloadServers()) {
+      return false;
+    }
+    console.error(`PHP ${version} does not run (${error.message}); downloading PHP ${pinned}`);
+    try {
+      await downloadAndExtract(DOWNLOADS.php.urls, dirOf(pinned), { prepare: preparePhp });
+    } catch (downloadError) {
+      console.error(`PHP ${pinned} could not be downloaded: ${downloadError.message}`);
+      return false;
+    }
+    replacement = pinned;
+  }
+  if (!(await runs(dirOf(replacement)))) {
+    console.error(`PHP ${replacement} does not run either; keeping PHP ${version}`);
+    return false;
+  }
+
+  try {
+    fs.rmSync(`${dirOf(version)}.failed`, { recursive: true, force: true });
+    fs.renameSync(dirOf(version), `${dirOf(version)}.failed`);
+  } catch (renameError) {
+    console.error(`Could not set PHP ${version} aside: ${renameError.message}`);
+    return false;
+  }
+  console.error(`PHP ${version} does not run (${error.message}); using PHP ${replacement}`);
+  return true;
+}
+
+// Remove the PHP releases older than `version`, which runs now
+async function removeOlderPhp(version) {
+  const { serverPath } = getPaths();
+  for (const older of usablePhpVersions(serverPath).filter(other => systemTools.compareVersions(other, version) < 0)) {
+    await removeQuietly(path.join(serverPath, `php-${older}`));
+    console.log(`Removed PHP ${older}, replaced by PHP ${version}`);
+  }
+}
+
+// Look for a newer PHP release of the branch and download it next to the one
+// in use; it runs from the next start. For a PHP the app downloaded itself,
+// at most once a day, and never in the way: the list has a short timeout,
+// nothing changes until a download is complete and checked, and failures are
+// only logged (a computer without internet keeps its PHP). Returns the
+// version downloaded, or null.
+const PHP_UPDATE_INTERVAL_MS = 24 * 60 * 60 * 1000;
+const PHP_UPDATE_FILE = 'php-update-check.json';
+let phpUpdate = null;
+
+function updatePhp({ now = Date.now() } = {}) {
+  if (!phpUpdate) {
+    phpUpdate = checkForPhpUpdate(now)
+      .catch(error => {
+        console.error(`Could not update PHP: ${error.message}`);
+        return null;
+      })
+      .finally(() => {
+        phpUpdate = null;
+      });
+  }
+  return phpUpdate;
+}
+
+async function checkForPhpUpdate(now) {
+  if (isDevMode() || !canDownloadServers()) {
+    return null;
+  }
+  const php = resolvePhp();
+  if (php.source !== 'bundled') {
+    return null;
+  }
+  const stateFile = path.join(dataPath, PHP_UPDATE_FILE);
+  let checkedAt = null;
+  try {
+    checkedAt = JSON.parse(fs.readFileSync(stateFile, 'utf8')).checkedAt;
+  } catch (error) {
+    // Never checked, or a damaged file: check now
+  }
+  if (Number.isFinite(checkedAt) && checkedAt <= now && now - checkedAt < PHP_UPDATE_INTERVAL_MS) {
+    return null;
+  }
+
+  const latest = await readPhpReleases();
+  fs.writeFileSync(stateFile, JSON.stringify({ checkedAt: now }));
+  // Never a release older than the pinned one, even from a list that lags
+  // behind, and nothing that is not newer than the one in use
+  if (systemTools.compareVersions(latest.version, DOWNLOADS.php.version) < 0 ||
+      systemTools.compareVersions(latest.version, php.version) <= 0) {
+    return null;
+  }
+  const target = path.join(getPaths().serverPath, `php-${latest.version}`);
+  if (fs.existsSync(`${target}.failed`)) {
+    return null;
+  }
+  console.log(`Downloading PHP ${latest.version} (PHP ${php.version} is in use)...`);
+  await downloadAndExtract([latest.url], target, { prepare: preparePhp, sha256: latest.sha256 });
+  if (!(await setAsideUnlessRuns(target))) {
+    console.error(`PHP ${latest.version} does not run here; keeping PHP ${php.version}`);
+    return null;
+  }
+  console.log(`PHP ${latest.version} is ready and runs from the next start`);
+  return latest.version;
 }
 
 async function initializeDatabase() {
@@ -1120,7 +1386,7 @@ async function removeDevStandIns() {
 
 // Download required server files. Components that are already present are skipped.
 async function downloadServers() {
-  const { serverPath, phpDir, mariadbDir, mediaWikiPath } = getPaths();
+  const { serverPath, mariadbDir, mediaWikiPath } = getPaths();
   fs.mkdirSync(serverPath, { recursive: true });
 
   // In dev mode, we'll simulate the downloads with dummy files
@@ -1141,10 +1407,7 @@ async function downloadServers() {
     console.log(`Using installed PHP ${php.version} (${php.exe})`);
   } else if (!php.source) {
     assertCanDownload('PHP', php.problem);
-    console.log(`Downloading PHP ${DOWNLOADS.php.version}...`);
-    await downloadAndExtract(DOWNLOADS.php.urls, phpDir, {
-      prepare: (root, finalDir) => configurePhpIni(root, finalDir)
-    });
+    await downloadPhp();
   }
 
   const database = resolveDatabase();
@@ -1256,14 +1519,27 @@ async function startPhp() {
   // Also here: the settings, which do it too, are not rewritten after a failed update
   wikiSettings.prepareBundledPrograms(mediaWikiPath);
   const port = await portfinder.getPortPromise({ port: DEFAULT_PHP_PORT });
-  const child = await spawnServer(
-    'PHP',
-    'php',
-    php.exe,
-    phpArgs(php, ['-S', `${LOOPBACK_HOST}:${port}`, '-t', mediaWikiPath]),
-    port,
-    { cwd: php.cwd, env: { ...process.env, [DB_PORT_ENV]: String(mysqlPort) } }
-  );
+  let child;
+  try {
+    child = await spawnServer(
+      'PHP',
+      'php',
+      php.exe,
+      phpArgs(php, ['-S', `${LOOPBACK_HOST}:${port}`, '-t', mediaWikiPath]),
+      port,
+      { cwd: php.cwd, env: { ...process.env, [DB_PORT_ENV]: String(mysqlPort) } }
+    );
+  } catch (error) {
+    // A newer PHP release that does not start: set it aside, run the one before
+    if (php.source === 'bundled' && await recoverFromFailedPhp(php.version, error)) {
+      return startPhp();
+    }
+    throw error;
+  }
+  if (php.source === 'bundled') {
+    // Only once the newer release serves the wiki
+    removeOlderPhp(php.version).catch(error => console.error(`Could not remove older PHP releases: ${error.message}`));
+  }
 
   phpProcess = child;
   phpPort = port;
@@ -2220,9 +2496,16 @@ module.exports = {
   retrySettingsUpdate,
   startServers,
   stopServers,
+  updatePhp,
   // Building blocks, exported for the tests only
   _internal: {
     configurePhpIni,
+    downloadPhp,
+    readPhpReleases,
+    latestPhpRelease,
+    recoverFromFailedPhp,
+    setPhpCheck,
+    removeOlderPhp,
     downloadAndExtract,
     copyMediaWiki,
     lockRetry,

@@ -248,6 +248,14 @@ async function runOperation(action, task, errorLabel) {
   }
 }
 
+// Start the servers; then, without waiting, look for a newer PHP release,
+// which is used from the next start
+async function startServers() {
+  const result = await serverManager.startServers();
+  serverManager.updatePhp().catch(error => console.error('PHP update check failed:', error.message));
+  return result;
+}
+
 const operations = {
   download: () => runOperation('download', async () => {
     await downloadServers();
@@ -258,7 +266,7 @@ const operations = {
   }, 'Failed to install MediaWiki'),
 
   start: () => runOperation('start', async () => {
-    return serverManager.startServers();
+    return startServers();
   }, 'Failed to start servers'),
 
   stop: () => runOperation('stop', async () => {
@@ -267,7 +275,7 @@ const operations = {
 
   restart: () => runOperation('restart', async () => {
     await serverManager.stopServers();
-    return serverManager.startServers();
+    return startServers();
   }, 'Failed to restart servers'),
 
   // The servers are stopped for the upgrade and started again afterwards if
@@ -281,11 +289,11 @@ const operations = {
       await serverManager.upgradeMediaWiki();
     } catch (error) {
       if (wasRunning) {
-        await serverManager.startServers().catch(startError => console.error('Failed to restart servers:', startError.message));
+        await startServers().catch(startError => console.error('Failed to restart servers:', startError.message));
       }
       throw error;
     }
-    return wasRunning ? serverManager.startServers() : undefined;
+    return wasRunning ? startServers() : undefined;
   }, 'Failed to upgrade MediaWiki'),
 
   // After a failed update of the app's settings the wiki runs as it was, and
@@ -296,7 +304,7 @@ const operations = {
     if (getStatus().running) {
       await serverManager.stopServers();
     }
-    return serverManager.startServers();
+    return startServers();
   }, 'Failed to update the wiki settings')
 };
 

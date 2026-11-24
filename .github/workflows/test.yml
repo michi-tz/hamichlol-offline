@@ -157,11 +157,15 @@ jobs:
         with:
           node-version: 22
           cache: npm
+      # Before the versions: finding the PHP release runs the app's own code
+      - run: npm ci
       - name: Versions
         id: versions
         run: |
           node scripts/mediawiki-release.js "$MEDIAWIKI_UPGRADE_FROM" | tee -a "$GITHUB_OUTPUT"
-          echo "servers=php-$(node -p "require('./src/versions').DOWNLOADS.php.version")-mariadb-$(node -p "require('./src/versions').DOWNLOADS.mariadb.version")" | tee -a "$GITHUB_OUTPUT"
+          # The PHP release the app would download now: a new patch release
+          # gets a new cache entry instead of an old PHP being kept
+          node scripts/download-servers.js --versions | tee -a "$GITHUB_OUTPUT"
       - name: Cache the MediaWiki releases
         id: mediawiki-cache
         uses: actions/cache@v6
@@ -196,7 +200,6 @@ jobs:
             echo "HAMICHLOL_TEST_OLD_MEDIAWIKI_DIR=$(cygpath -w "$TARGET/mediawiki-$OLD_VERSION")"
             echo "HAMICHLOL_TEST_MEDIAWIKI_ZIP=$(cygpath -w "$MEDIAWIKI_RELEASES/mediawiki-$VERSION.zip")"
           } >> "$GITHUB_ENV"
-      - run: npm ci
       - name: Cache the downloaded servers
         uses: actions/cache@v6
         with:
