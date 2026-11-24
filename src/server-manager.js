@@ -1025,8 +1025,15 @@ function preparePhp(root, finalDir) {
   configurePhpIni(root, finalDir);
 }
 
+// How a PHP release is checked to run; the unit tests, whose PHP folders hold
+// no real program, replace it
+let phpCheck = dir => phpRuns(dir);
+function setPhpCheck(check) {
+  phpCheck = check;
+}
+
 // Download the newest PHP release of the branch, or the pinned release when
-// that fails. Returns the version that was installed.
+// that fails or does not run. Returns the version that was installed.
 async function downloadPhp() {
   const { serverPath } = getPaths();
   const latest = await latestPhpRelease();
@@ -1035,8 +1042,14 @@ async function downloadPhp() {
   } else if (latest) {
     try {
       console.log(`Downloading PHP ${latest.version}...`);
-      await downloadAndExtract([latest.url], path.join(serverPath, `php-${latest.version}`), { prepare: preparePhp, sha256: latest.sha256 });
-      return latest.version;
+      const dir = path.join(serverPath, `php-${latest.version}`);
+      await downloadAndExtract([latest.url], dir, { prepare: preparePhp, sha256: latest.sha256 });
+      if (!(await phpCheck(dir))) {
+        // Set aside only when the pinned release runs instead: when neither
+        // does, the computer is at fault (a missing runtime, say), not the release
+        await recoverFromFailedPhp(latest.version, new Error('php -v failed'));
+      }
+      return getPaths().phpVersion;
     } catch (error) {
       console.error(`PHP ${latest.version} could not be downloaded (${error.message}); downloading PHP ${DOWNLOADS.php.version}`);
     }
@@ -1044,6 +1057,19 @@ async function downloadPhp() {
   console.log(`Downloading PHP ${DOWNLOADS.php.version}...`);
   await downloadAndExtract(DOWNLOADS.php.urls, path.join(serverPath, `php-${DOWNLOADS.php.version}`), { prepare: preparePhp });
   return DOWNLOADS.php.version;
+}
+
+// A release downloaded next to the one in use, which serves the wiki, is
+// checked before it can run it: one whose php.exe does not run here is
+// renamed to "<folder>.failed" at once, so that no start ever picks it.
+// Returns whether it runs.
+async function setAsideUnlessRuns(dir) {
+  if (await phpCheck(dir)) {
+    return true;
+  }
+  fs.rmSync(`${dir}.failed`, { recursive: true, force: true });
+  fs.renameSync(dir, `${dir}.failed`);
+  return false;
 }
 
 // Whether the PHP in `dir` runs at all, with its own php.ini
@@ -1064,7 +1090,7 @@ async function phpRuns(dir) {
 // renamed until that other release has been checked, so a computer that is
 // offline, or where no release runs, keeps what it has. Returns whether
 // another release is ready to be started.
-async function recoverFromFailedPhp(version, error, runs = phpRuns) {
+async function recoverFromFailedPhp(version, error, runs = phpCheck) {
   const { serverPath } = getPaths();
   const versions = usablePhpVersions(serverPath);
   const dirOf = release => path.join(serverPath, `php-${release}`);
@@ -1169,6 +1195,10 @@ async function checkForPhpUpdate(now) {
   }
   console.log(`Downloading PHP ${latest.version} (PHP ${php.version} is in use)...`);
   await downloadAndExtract([latest.url], target, { prepare: preparePhp, sha256: latest.sha256 });
+  if (!(await setAsideUnlessRuns(target))) {
+    console.error(`PHP ${latest.version} does not run here; keeping PHP ${php.version}`);
+    return null;
+  }
   console.log(`PHP ${latest.version} is ready and runs from the next start`);
   return latest.version;
 }
@@ -2474,6 +2504,7 @@ module.exports = {
     readPhpReleases,
     latestPhpRelease,
     recoverFromFailedPhp,
+    setPhpCheck,
     removeOlderPhp,
     downloadAndExtract,
     copyMediaWiki,

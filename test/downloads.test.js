@@ -722,6 +722,49 @@ describe('Downloads', function() {
         }
       });
 
+      it('should set aside a new release that does not run, and download the pinned one', async function() {
+        publish(newer());
+        const { setPhpCheck } = require('../src/server-manager')._internal;
+        setPhpCheck(async dir => !dir.endsWith(`php-${newer()}`));
+        try {
+          await downloadAsWindows();
+        } finally {
+          setPhpCheck(async () => true);
+        }
+
+        expect(requests).to.include('/php.zip');
+        expect(getPaths().phpVersion).to.equal(pinned());
+        expect(fs.existsSync(path.join(getPaths().serverPath, `php-${newer()}.failed`))).to.be.true;
+      });
+
+      it('should keep the newest release when the pinned one does not run either', async function() {
+        publish(newer());
+        const { setPhpCheck } = require('../src/server-manager')._internal;
+        setPhpCheck(async () => false);
+        try {
+          await downloadAsWindows();
+        } finally {
+          setPhpCheck(async () => true);
+        }
+
+        expect(getPaths().phpVersion).to.equal(newer());
+        expect(fs.readdirSync(getPaths().serverPath).some(name => name.endsWith('.failed'))).to.be.false;
+      });
+
+      it('should not download the pinned release twice when it is the newest and does not run', async function() {
+        publish(pinned());
+        const { setPhpCheck } = require('../src/server-manager')._internal;
+        setPhpCheck(async () => false);
+        try {
+          await downloadAsWindows();
+        } finally {
+          setPhpCheck(async () => true);
+        }
+
+        expect(requests.filter(request => request.includes('php'))).to.deep.equal([`/${zipName(pinned())}`]);
+        expect(getPaths().phpVersion).to.equal(pinned());
+      });
+
       it('should not download again a release that did not start here', async function() {
         publish(newer());
         fs.mkdirSync(path.join(getPaths().serverPath, `php-${newer()}.failed`), { recursive: true });
@@ -846,6 +889,20 @@ describe('Downloads', function() {
         expect(getPaths().phpVersion).to.equal(pinned());
         expect(fs.readdirSync(getPaths().serverPath).filter(name => name.startsWith('php-'))).to.deep.equal([`php-${pinned()}`]);
         expect(getStatus().downloaded).to.be.true;
+      });
+
+      it('should keep the release in use when the new one does not run', async function() {
+        publish(newer());
+        const { setPhpCheck } = _internal;
+        setPhpCheck(async dir => !dir.endsWith(`php-${newer()}`));
+        try {
+          expect(await updateAsWindows()).to.be.null;
+        } finally {
+          setPhpCheck(async () => true);
+        }
+
+        expect(getPaths().phpVersion).to.equal(pinned());
+        expect(fs.existsSync(path.join(getPaths().serverPath, `php-${newer()}.failed`))).to.be.true;
       });
 
       it('should never update to a release older than the pinned one', async function() {
