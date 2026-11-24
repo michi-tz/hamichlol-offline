@@ -8,7 +8,10 @@ const { spawn } = require('child_process');
 // Set dev mode for testing (server-manager reads the flag at call time)
 process.env.DEV_MODE = 'true';
 
-const { DOWNLOADS } = require('../src/versions');
+const { DOWNLOADS, MEDIAWIKI_BRANCH } = require('../src/versions');
+
+// An installed MediaWiki of the branch this app installs
+const SYSTEM_MW_VERSION = `${MEDIAWIKI_BRANCH}.0`;
 const {
   setDataPath,
   getPaths,
@@ -317,6 +320,10 @@ describe('Real mode with fake servers', function() {
     fs.mkdirSync(mediaWikiPath, { recursive: true });
     fs.writeFileSync(path.join(mediaWikiPath, 'index.php'), '');
     fs.writeFileSync(localSettings, '');
+    // The app's settings are in place and the schema update already ran for
+    // them (this PHP stand-in can only serve pages)
+    const settings = require('../src/wiki-settings');
+    settings.writeSchemaStamp(mediaWikiPath, settings.writeSettings(mediaWikiPath).hash);
   });
 
   after(async function() {
@@ -614,18 +621,20 @@ describe('Installed software detection', function() {
   });
 
   it('should accept a complete MediaWiki and reject old or incomplete ones', function() {
-    const good = fakeMediaWiki('mw-good', '1.39.7');
+    const good = fakeMediaWiki('mw-good', SYSTEM_MW_VERSION);
     const old = fakeMediaWiki('mw-old', '1.35.14');
-    const incomplete = fakeMediaWiki('mw-incomplete', '1.43.0');
+    const otherBranch = fakeMediaWiki('mw-other-branch', '1.43.11');
+    const incomplete = fakeMediaWiki('mw-incomplete', SYSTEM_MW_VERSION);
     fs.rmSync(path.join(incomplete, 'vendor'), { recursive: true });
 
     expect(systemTools.findSystemMediaWiki([good])).to.deep.equal({
-      dir: good, version: '1.39.7', minPhp: null, usable: true, reason: null
+      dir: good, version: SYSTEM_MW_VERSION, minPhp: null, usable: true, reason: null
     });
 
     fs.writeFileSync(path.join(good, 'composer.json'), JSON.stringify({ require: { php: '>=7.4.3', 'ext-xml': '*' } }));
     expect(systemTools.findSystemMediaWiki([good]).minPhp).to.equal('7.4.3');
     expect(systemTools.findSystemMediaWiki([old]).usable).to.be.false;
+    expect(systemTools.findSystemMediaWiki([otherBranch])).to.include({ usable: false, reason: `נדרשת גרסה ${MEDIAWIKI_BRANCH}` });
     expect(systemTools.findSystemMediaWiki([incomplete]).usable).to.be.false;
     expect(systemTools.findSystemMediaWiki([path.join(tempDir, 'missing')]).usable).to.be.false;
     expect(systemTools.findSystemMediaWiki([old, good]).dir).to.equal(good);
@@ -700,7 +709,7 @@ describe('Real mode with installed software', function() {
     }
     fs.writeFileSync(path.join(mediawiki, 'index.php'), 'existing');
     fs.writeFileSync(path.join(mediawiki, 'maintenance', 'install.php'), '');
-    fs.writeFileSync(path.join(mediawiki, 'includes', 'Defines.php'), "<?php\ndefine( 'MW_VERSION', '1.39.7' );\n");
+    fs.writeFileSync(path.join(mediawiki, 'includes', 'Defines.php'), `<?php\ndefine( 'MW_VERSION', '${SYSTEM_MW_VERSION}' );\n`);
     fs.writeFileSync(path.join(mediawiki, 'LocalSettings.php'), 'secret');
     fs.writeFileSync(path.join(mediawiki, 'images', 'upload.png'), 'x');
     fs.symlinkSync(path.join(mediawiki, 'includes'), path.join(mediawiki, 'linked'));
@@ -739,7 +748,7 @@ describe('Real mode with installed software', function() {
     expect(status.downloaded).to.be.false;
     expect(status.tools.php).to.include({ source: 'system', version: '8.3.6', path: process.env[systemTools.ENV.php] });
     expect(status.tools.database).to.include({ source: 'system', version: '10.11.14', flavor: 'mariadb' });
-    expect(status.tools.mediawiki).to.include({ source: 'system', version: '1.39.7' });
+    expect(status.tools.mediawiki).to.include({ source: 'system', version: SYSTEM_MW_VERSION });
   });
 
   it('should set up without downloading PHP or the database server', async function() {
@@ -752,7 +761,7 @@ describe('Real mode with installed software', function() {
 
     const status = getStatus();
     expect(status.downloaded).to.be.true;
-    expect(status.tools.mediawiki).to.include({ source: 'installed', version: '1.39.7' });
+    expect(status.tools.mediawiki).to.include({ source: 'installed', version: SYSTEM_MW_VERSION });
   });
 
   it('should copy MediaWiki without the existing wiki and without touching it', function() {

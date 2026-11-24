@@ -4,8 +4,11 @@
 // Not part of `npm test`:
 //   npm run test:system
 //
-// The suite is skipped when suitable software is not installed. On Ubuntu:
-//   sudo apt install php-cli php-mysql php-intl php-mbstring php-xml mariadb-server mediawiki
+// The suite is skipped when suitable software is not installed, unless
+// HAMICHLOL_SYSTEM_TESTS_REQUIRED is set (as in CI): then it fails. On Ubuntu:
+//   sudo apt install php-cli php-mysql php-intl php-mbstring php-xml mariadb-server
+// MediaWiki must be of the branch in src/versions.js, which distributions do
+// not package: extract the release and point HAMICHLOL_MEDIAWIKI_DIR at it.
 // The system's own database service is not used or touched, and does not need
 // to be running: the app starts its own server process on its own data folder.
 
@@ -13,13 +16,35 @@ const { describe, it, before, after } = require('mocha');
 const { expect } = require('chai');
 const fs = require('fs');
 const path = require('path');
-const { spawn } = require('child_process');
+const { spawn, execFileSync } = require('child_process');
 
-const { makeTempDir, removeDir, isAlive, waitFor, readJson, setEnv } = require('../helpers');
+const { makeTempDir, removeDir, isAlive, waitFor, readJson, setEnv, skipUnlessRequired } = require('../helpers');
 const systemTools = require('../../src/system-tools');
 const serverManager = require('../../src/server-manager');
 
 const { setDataPath, getPaths, getStatus, downloadServers, installMediaWiki, startServers, stopServers } = serverManager;
+
+// A tiny page that needs each of the main extensions the app enables
+const FIXTURE = {
+  module: ['יחידה:בדיקת מערכת', [
+    'local p = {}',
+    'function p.hello( frame )',
+    "\treturn 'שלום ' .. frame.args[1] .. ' ' .. mw.ustring.len( 'אבג' )",
+    'end',
+    'return p',
+    ''
+  ].join('\n')],
+  styles: ['תבנית:בדיקת מערכת/סגנון.css', '.hamichlol-system-test { color: #123456; }'],
+  page: ['בדיקת מערכת', [
+    '{{#invoke:בדיקת מערכת|hello|עולם}}',
+    '{{#תנאי:כן|פונקציית-תנאי}} {{#expr: 6 * 7}}',
+    'טקסט<ref>הערת בדיקה</ref>',
+    '<templatestyles src="תבנית:בדיקת מערכת/סגנון.css"/><span class="hamichlol-system-test">מעוצב</span>',
+    '<math>\\sqrt{x^2}</math>',
+    '<references/>',
+    ''
+  ].join('\n')]
+};
 
 const CONFIG = {
   dbName: 'hamichlol_test',
@@ -67,10 +92,9 @@ describe('Real installed software', function() {
       .filter(([, tool]) => !tool || !tool.usable)
       .map(([name, tool]) => `${name}${tool ? ` (${tool.reason})` : ''}`);
     if (missing.length > 0) {
-      console.log(`    Skipped: not installed or not suitable: ${missing.join(', ')}`);
       restoreEnv();
       restoreEnv = null;
-      this.skip();
+      skipUnlessRequired(this, `not installed or not suitable: ${missing.join(', ')}`);
     }
     console.log(`    PHP ${found.PHP.version}, ${found['MariaDB/MySQL'].flavor} ${found['MariaDB/MySQL'].version}, MediaWiki ${found.MediaWiki.version}`);
 
@@ -158,6 +182,45 @@ describe('Real installed software', function() {
     expect(query.general.server).to.equal(`http://127.0.0.1:${ports.phpPort}`);
   });
 
+  it('should enable the bundled extensions and the site\'s namespaces', async function() {
+    const { query } = await api('action=query&meta=siteinfo&siprop=general|namespaces|namespacealiases|extensions&formatversion=2');
+
+    const extensions = query.extensions.map(extension => extension.name);
+    for (const name of ['ParserFunctions', 'Scribunto', 'Cite', 'TemplateStyles', 'Math', 'TemplateData', 'VisualEditor']) {
+      expect(extensions, name).to.include(name);
+    }
+    expect(extensions).to.not.include('Echo');
+    expect(query.namespaces['4'].name).to.equal('המכלול');
+    expect(query.namespaces['4000'].name).to.equal('פורטל');
+    // The project namespace's name from the installation still works
+    expect(query.namespacealiases).to.deep.include({ id: 4, alias: CONFIG.wikiName });
+    expect(query.general.timezone).to.equal('Asia/Jerusalem');
+  });
+
+  it('should render a Lua module, a parser function, a reference, a style sheet and a formula', async function() {
+    const mediaWikiPath = getPaths().mediaWikiPath;
+    for (const [title, text] of Object.values(FIXTURE)) {
+      execFileSync(systemTools.findSystemPhp().exe, [path.join(mediaWikiPath, 'maintenance', 'run.php'), 'edit', '--user', CONFIG.adminUser, title], {
+        cwd: mediaWikiPath,
+        input: text,
+        env: { ...process.env, HAMICHLOL_DB_PORT: String(ports.mysqlPort) }
+      });
+    }
+
+    const { parse } = await api(`action=parse&prop=text|categories&formatversion=2&page=${encodeURIComponent(FIXTURE.page[0])}`);
+    const html = parse.text;
+
+    expect(html, 'Lua').to.include('שלום עולם 3');
+    expect(html, 'ParserFunctions').to.include('פונקציית-תנאי').and.to.include('42');
+    expect(html, 'Cite').to.match(/<sup [^>]*class="reference"/).and.to.match(/<ol class="references">[\s\S]*הערת בדיקה/);
+    expect(html, 'TemplateStyles').to.match(/<style data-mw-deduplicate="TemplateStyles:r\d+">[^<]*\.hamichlol-system-test\{color:#123456\}/);
+    expect(html, 'Math').to.include('<math xmlns="http://www.w3.org/1998/Math/MathML"').and.to.include('<msqrt>');
+    expect(html).to.not.match(/class="[^"]*\b(error|scribunto-error)\b/);
+    expect(html).to.not.include('{{#');
+    // No tracking category of a failed script, style sheet or formula
+    expect(parse.categories).to.deep.equal([]);
+  });
+
   it('should have created the administrator account', async function() {
     const { query } = await api(`action=query&list=users&usprop=groups&ususers=${encodeURIComponent(CONFIG.adminUser)}`);
 
@@ -241,6 +304,74 @@ describe('Real installed software', function() {
     expect(query.general.sitename).to.equal(CONFIG.wikiName);
 
     await stopServers();
+  });
+
+  // The update.php that runs when the app's settings change fails half-way:
+  // the wiki starts on the database copied before it, with sync blocked
+  it('should start the wiki as it was when the update of changed settings fails', async function() {
+    const { mediaWikiPath, localSettings } = getPaths();
+    const wikiSettings = require('../../src/wiki-settings');
+    // An update that changes the database (a table, made by MediaWiki's own
+    // updater), then fails on SQL an extension got wrong; only when asked to,
+    // so the retry below succeeds
+    const marker = path.join(dataDir, 'marker.sql');
+    const broken = path.join(dataDir, 'broken.sql');
+    fs.writeFileSync(marker, 'CREATE TABLE /*_*/hamichlol_test_marker ( id INT );\n');
+    fs.writeFileSync(broken, 'CREATE TABLE /*_*/hamichlol_test_broken ( this is not sql );\n');
+    const ownSettings = [
+      '',
+      "$wgHooks['LoadExtensionSchemaUpdates'][] = static function ( $updater ) {",
+      `\t$updater->addExtensionTable( 'hamichlol_test_marker', ${JSON.stringify(marker)} );`,
+      "\tif ( getenv( 'HAMICHLOL_TEST_FAIL_UPDATE' ) ) {",
+      `\t\t$updater->addExtensionTable( 'hamichlol_test_broken', ${JSON.stringify(broken)} );`,
+      '\t}',
+      '};',
+      ''
+    ].join('\n');
+    fs.appendFileSync(localSettings, ownSettings);
+    // As if a newer app had changed the settings since the last update
+    fs.writeFileSync(path.join(mediaWikiPath, wikiSettings.SCHEMA_STAMP_FILE), JSON.stringify({ settings: 'older' }));
+    const hasMarker = async () => {
+      const connection = await require('mysql2/promise').createConnection({ host: '127.0.0.1', port: ports.mysqlPort, user: 'root' });
+      try {
+        const [rows] = await connection.query(`SHOW TABLES FROM \`${CONFIG.dbName}\` LIKE 'mw_hamichlol_test_marker'`);
+        return rows.length > 0;
+      } finally {
+        await connection.end();
+      }
+    };
+
+    const restore = setEnv({ HAMICHLOL_TEST_FAIL_UPDATE: '1' });
+    try {
+      ports = await startServers();
+    } finally {
+      restore();
+    }
+
+    try {
+      const { syncBlocked } = getStatus();
+      expect(syncBlocked).to.include({ reason: 'settings-update-failed' });
+      expect(syncBlocked.details, syncBlocked.details).to.include('hamichlol_test_broken');
+      expect(await hasMarker(), 'the table the failed update made').to.be.false;
+      expect(JSON.parse(fs.readFileSync(path.join(mediaWikiPath, wikiSettings.SCHEMA_STAMP_FILE), 'utf8')).settings).to.equal('older');
+      const { query } = await api('action=query&meta=siteinfo&siprop=statistics|general');
+      expect(query.general.sitename).to.equal(CONFIG.wikiName);
+      expect(query.statistics.pages).to.be.at.least(1);
+      expect(fs.readdirSync(dataDir).filter(name => /settings/.test(name))).to.deep.equal([]);
+    } finally {
+      await stopServers();
+    }
+
+    // Tried again when asked, and it succeeds
+    serverManager.retrySettingsUpdate();
+    ports = await startServers();
+    try {
+      expect(getStatus().syncBlocked).to.be.null;
+      expect(await hasMarker()).to.be.true;
+    } finally {
+      await stopServers();
+      fs.writeFileSync(localSettings, fs.readFileSync(localSettings, 'utf8').replace(ownSettings, ''));
+    }
   });
 
   it('should refuse to install a second time', async function() {

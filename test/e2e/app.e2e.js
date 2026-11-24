@@ -605,6 +605,74 @@ describe('Application window (dev mode)', function() {
       expect(await page.isEnabled('#startServersBtn')).to.be.true;
     });
 
+    it('should offer to upgrade a wiki installed with an older MediaWiki, and upgrade it', async function() {
+      await download();
+      await install();
+      expect(await page.isVisible('#upgradeNotice')).to.be.false;
+      // As if the wiki had been installed by an earlier version of the app
+      const defines = path.join(dataDir, 'mediawiki', 'includes', 'Defines.php');
+      fs.mkdirSync(path.dirname(defines), { recursive: true });
+      fs.writeFileSync(defines, "<?php\ndefine( 'MW_VERSION', '1.43.11' );\n");
+      await close();
+      await launch();
+
+      const { DOWNLOADS } = require('../../src/versions');
+      expect(await visibleSteps()).to.deep.equal(['step3']);
+      expect(await page.isVisible('#upgradeNotice')).to.be.true;
+      expect(await page.textContent('#upgradeText')).to.include('1.43.11').and.to.include(DOWNLOADS.mediawiki.version);
+      expect(await menuItem('upgrade')).to.include({ enabled: true });
+
+      await page.click('#upgradeBtn');
+      await page.waitForSelector('#upgradeNotice', { state: 'hidden' });
+      expect(await menuItem('upgrade')).to.include({ enabled: false });
+      expect(fs.readFileSync(defines, 'utf8')).to.include(DOWNLOADS.mediawiki.version);
+      expect(await page.isEnabled('#startServersBtn')).to.be.true;
+    });
+
+    it('should say when sync is blocked by a failed update of the settings, without reporting a failed start', async function() {
+      await download();
+      await install();
+      expect(await page.isVisible('#syncNotice')).to.be.false;
+      // As the server manager records a failed update (dev mode never runs one)
+      fs.writeFileSync(path.join(dataDir, 'mediawiki', 'HamichlolSettings.failed.json'), JSON.stringify({
+        settings: 'abc', since: '2026-11-01T10:00:00.000Z', failedAt: '2026-11-01T10:00:00.000Z',
+        error: 'עדכון מסד הנתונים של MediaWiki (update.php) נכשל.\nError 4161: Unknown data type'
+      }));
+      await close();
+      await launch();
+
+      // The setup screen: a warning with the reason, and a way to try again
+      expect(await page.isVisible('#syncNotice')).to.be.true;
+      const notice = await page.textContent('#syncNotice');
+      expect(notice).to.include('נכשל').and.include('הוחזר למצבו הקודם').and.include('הסנכרון עם אתר המכלול חסום')
+        .and.include('Unknown data type');
+      expect(await page.isVisible('#retrySettingsBtn')).to.be.true;
+      expect(await page.getAttribute('#status', 'class')).to.not.include('error');
+      expect(await menuItem('retrySettings')).to.include({ enabled: true });
+
+      // The wiki starts as usual; the bar says sync is blocked, not that the start failed
+      await page.click('#startServersBtn');
+      await wikiView();
+      const indicator = '#serversIndicator';
+      await page.waitForFunction(() => document.getElementById('serversIndicator').classList.contains('warning'));
+      const shown = await page.textContent(indicator);
+      expect(shown).to.include('הסנכרון חסום').and.include('עדכון ההגדרות של הוויקי נכשל');
+      expect(shown).to.not.include('נכשלה');
+      expect(await page.getAttribute(indicator, 'class')).to.not.include('error');
+      expect(await page.getAttribute(indicator, 'role')).to.equal('status');
+      expect(await page.getAttribute(indicator, 'title')).to.include('הוחזר למצבו הקודם')
+        .and.include('הסנכרון עם אתר המכלול חסום').and.include('Unknown data type');
+      expect(await page.$eval('#wikiBar', bar => bar.getBoundingClientRect().height)).to.equal(48);
+
+      // Trying again from the menu (in dev mode it simply succeeds)
+      await clickMenuItem('retrySettings');
+      await page.waitForFunction(() => document.getElementById('serversIndicator').classList.contains('running'));
+      await wikiView();
+      expect(await page.textContent(indicator)).to.include('השרתים פועלים');
+      expect(await menuItem('retrySettings')).to.be.null;
+      expect(fs.existsSync(path.join(dataDir, 'mediawiki', 'HamichlolSettings.failed.json'))).to.be.false;
+    });
+
     it('should not keep the servers running across a restart', async function() {
       await download();
       await install();

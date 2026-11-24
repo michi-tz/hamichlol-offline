@@ -7,15 +7,18 @@
 
 const APP_NAME = 'המכלול אופליין';
 
-// `state`: { installed, running, busy, wikiShown }
-// `actions`: start, stop, restart, quit, wikiHome, wikiBack, wikiForward,
-//   wikiReload, wikiOpenExternal, zoomIn, zoomOut, zoomReset, toggleDevTools,
-//   about, openDataFolder
+// `state`: { installed, running, busy, wikiShown, upgrade, syncBlocked }
+//   (upgrade: { from, to } or null; syncBlocked: getStatus().syncBlocked)
+// `actions`: start, stop, restart, upgrade, retrySettings, quit, wikiHome,
+//   wikiBack, wikiForward, wikiReload, wikiOpenExternal, zoomIn, zoomOut,
+//   zoomReset, toggleDevTools, about, openDataFolder
 function buildMenuTemplate(state, actions, { platform = process.platform } = {}) {
   const busy = Boolean(state.busy);
   const canStart = Boolean(state.installed) && !state.running && !busy;
   const canStop = Boolean(state.running) && !busy;
   const wiki = Boolean(state.wikiShown);
+  const upgrade = state.upgrade || null;
+  const failedSettingsUpdate = Boolean(state.syncBlocked) && state.syncBlocked.reason === 'settings-update-failed';
   const isMac = platform === 'darwin';
 
   const template = [];
@@ -44,6 +47,21 @@ function buildMenuTemplate(state, actions, { platform = process.platform } = {})
       { id: 'start', label: 'הפעל שרתים', enabled: canStart, click: () => actions.start() },
       { id: 'stop', label: 'עצור שרתים', enabled: canStop, click: () => actions.stop() },
       { id: 'restart', label: 'הפעל מחדש', enabled: canStop, click: () => actions.restart() },
+      { type: 'separator' },
+      {
+        id: 'upgrade',
+        label: upgrade ? `שדרג את MediaWiki לגרסה ${upgrade.to}` : 'שדרג את MediaWiki',
+        enabled: Boolean(upgrade) && !busy,
+        click: () => actions.upgrade()
+      },
+      // Only after the update of the app's settings failed (not while it is
+      // still to be undone: the next start does that)
+      ...(failedSettingsUpdate ? [{
+        id: 'retrySettings',
+        label: 'נסה שוב לעדכן את הגדרות הוויקי',
+        enabled: Boolean(state.installed) && !busy,
+        click: () => actions.retrySettings()
+      }] : []),
       ...(isMac ? [] : [
         { type: 'separator' },
         { id: 'quit', label: 'יציאה', accelerator: 'Ctrl+Q', click: () => actions.quit() }

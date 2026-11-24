@@ -9,13 +9,22 @@
 // - PHP follows the branch Wikimedia runs in production, so the wiki meets the
 //   same PHP behaviour its code is exercised with every day. A PHP that is
 //   already installed on the computer is used only if it is of this branch:
-//   MediaWiki 1.43 with PHP 8.5, for example, fails on every page.
+//   a PHP newer than the MediaWiki release supports can break every page (as
+//   PHP 8.5 did with the previously pinned MediaWiki 1.43).
+// - MediaWiki follows the version the Hamichlol site runs (1.46.2 in November
+//   2026), so pages, templates and modules behave as they do on the site. 1.46
+//   is not an LTS release: when the site upgrades, bump MEDIAWIKI_VERSION too.
+//   Wikis installed with an older version are upgraded in place (server-manager's
+//   upgradeMediaWiki, which runs update.php); a MediaWiki already installed on
+//   the computer is used only if it is of this branch.
+//   MediaWiki 1.46 requires PHP 8.3.0 or later (includes/PHPVersionCheck.php and
+//   composer.json of the 1.46.2 release), which PHP_VERSION meets.
 // - MariaDB 11.8 is an LTS release.
 // - PHP 8.0-8.3 Windows builds use Visual Studio 2019 (vs16); PHP 8.4+ uses vs17.
 
 const PHP_VERSION = '8.3.36';
 const MARIADB_VERSION = '11.8.9';
-const MEDIAWIKI_VERSION = '1.43.11';
+const MEDIAWIKI_VERSION = '1.46.2';
 
 const PHP_BRANCH = PHP_VERSION.split('.').slice(0, 2).join('.');
 const MEDIAWIKI_BRANCH = MEDIAWIKI_VERSION.split('.').slice(0, 2).join('.');
@@ -46,4 +55,4 @@ const DOWNLOADS = {
   }
 };
 
-module.exports = { DOWNLOADS, PHP_BRANCH };
+module.exports = { DOWNLOADS, PHP_BRANCH, MEDIAWIKI_BRANCH };
