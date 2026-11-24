@@ -295,7 +295,9 @@ describe('Real installed software', function() {
     await new Promise(resolve => crashed.once('exit', resolve));
 
     const leftover = readJson(getPaths().runStateFile);
-    expect(isAlive(leftover.mysql.pid), 'database left running by the crash').to.be.true;
+    // On Windows the database server does not outlive the process that
+    // started it; elsewhere it is left running, and the next start stops it
+    expect(isAlive(leftover.mysql.pid), 'database left running by the crash').to.equal(process.platform !== 'win32');
 
     ports = await startServers();
 

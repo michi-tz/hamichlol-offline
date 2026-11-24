@@ -288,6 +288,56 @@ function makeProgramsExecutable(mediaWikiDir) {
   }
 }
 
+// Scribunto starts its standalone Lua interpreter through proc_open(), and on
+// Windows wraps the command in an extra pair of double quotes, a workaround for
+// old PHP releases. PHP 8 already runs it as cmd.exe /s /c "<command>", so with
+// the extra quotes cmd.exe cannot find the program and every module fails with
+// "The interpreter exited with status 1". The statement is unchanged in
+// Scribunto's master branch (November 2026); a report on mediawiki.org:
+// https://www.mediawiki.org/wiki/Topic:W6pj4xql1tjpvfyb
+const LUA_INTERPRETER_FILE = 'extensions/Scribunto/includes/Engines/LuaStandalone/LuaStandaloneInterpreter.php';
+const LUA_EXTRA_QUOTES = `$cmd = '"' . $cmd . '"';`;
+const LUA_QUOTES_MARKER = '// hamichlol-offline: PHP 8 quotes the command for cmd.exe itself';
+
+// Remove that statement from the MediaWiki tree in `mediaWikiDir` (Windows
+// only). Only the exact statement is touched, and only when it occurs once;
+// anything else is left as it is and logged, so a Scribunto that changed is
+// never edited blindly. A file that cannot be written is logged, never thrown:
+// the wiki then starts with modules failing, rather than not at all. Returns
+// 'fixed', 'already-fixed', 'not-needed' (not Windows), 'no-scribunto',
+// 'unrecognised' or 'failed'.
+function fixWindowsLuaLaunch(mediaWikiDir, platform = process.platform) {
+  if (platform !== 'win32') {
+    return 'not-needed';
+  }
+  const file = path.join(mediaWikiDir, LUA_INTERPRETER_FILE);
+  const source = readIfExists(file);
+  if (source === null) {
+    return 'no-scribunto';
+  }
+  if (source.includes(LUA_QUOTES_MARKER)) {
+    return 'already-fixed';
+  }
+  if (source.split(LUA_EXTRA_QUOTES).length !== 2) {
+    console.warn(`Scribunto's Lua launch code is not as expected; leaving ${LUA_INTERPRETER_FILE} as it is`);
+    return 'unrecognised';
+  }
+  try {
+    replaceFile(file, source.replace(LUA_EXTRA_QUOTES, () => LUA_QUOTES_MARKER));
+  } catch (error) {
+    // E.g. a file an antivirus keeps locked: modules fail, but the wiki still starts
+    console.error(`Could not fix how Scribunto starts Lua (${LUA_INTERPRETER_FILE}): ${error.message}`);
+    return 'failed';
+  }
+  return 'fixed';
+}
+
+// Get the programs the extensions run ready to run on this computer
+function prepareBundledPrograms(mediaWikiDir) {
+  makeProgramsExecutable(mediaWikiDir);
+  fixWindowsLuaLaunch(mediaWikiDir);
+}
+
 // Written aside and renamed, so PHP never reads half a file
 function replaceFile(file, content) {
   fs.writeFileSync(`${file}.tmp`, content);
@@ -316,7 +366,7 @@ function writeSettings(mediaWikiDir) {
   if (patched !== source) {
     fs.writeFileSync(localSettings, patched);
   }
-  makeProgramsExecutable(mediaWikiDir);
+  prepareBundledPrograms(mediaWikiDir);
   const hash = settingsHash(content);
   return { hash, schemaUpToDate: readSchemaStamp(mediaWikiDir) === hash };
 }
@@ -440,6 +490,9 @@ module.exports = {
   removeInclude,
   settingsHash,
   makeProgramsExecutable,
+  LUA_INTERPRETER_FILE,
+  fixWindowsLuaLaunch,
+  prepareBundledPrograms,
   planSettings,
   writeSettings,
   previousFiles,

@@ -1253,6 +1253,8 @@ async function startPhp() {
 
   const { mediaWikiPath } = getPaths();
   const php = requirePhp();
+  // Also here: the settings, which do it too, are not rewritten after a failed update
+  wikiSettings.prepareBundledPrograms(mediaWikiPath);
   const port = await portfinder.getPortPromise({ port: DEFAULT_PHP_PORT });
   const child = await spawnServer(
     'PHP',

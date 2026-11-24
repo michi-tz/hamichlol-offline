@@ -136,3 +136,74 @@ jobs:
         run: xvfb-run -a npm run test:e2e
         env:
           HAMICHLOL_E2E_NO_SANDBOX: '1'
+
+  windows-system:
+    name: Real software (Windows)
+    # The PHP and MariaDB the app downloads on Windows, and MediaWiki's own
+    # Windows code paths (such as how Scribunto starts Lua), are only met here
+    runs-on: windows-latest
+    timeout-minutes: 45
+    defaults:
+      run:
+        shell: bash
+    env:
+      HAMICHLOL_SYSTEM_TESTS_REQUIRED: '1'
+      MEDIAWIKI_UPGRADE_FROM: 1.43.11
+      # Only the system tests run here; the app window is tested on Ubuntu
+      ELECTRON_SKIP_BINARY_DOWNLOAD: '1'
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-node@v5
+        with:
+          node-version: 22
+          cache: npm
+      - name: Versions
+        id: versions
+        run: |
+          node scripts/mediawiki-release.js "$MEDIAWIKI_UPGRADE_FROM" | tee -a "$GITHUB_OUTPUT"
+          echo "servers=php-$(node -p "require('./src/versions').DOWNLOADS.php.version")-mariadb-$(node -p "require('./src/versions').DOWNLOADS.mariadb.version")" | tee -a "$GITHUB_OUTPUT"
+      - name: Cache the MediaWiki releases
+        id: mediawiki-cache
+        uses: actions/cache@v6
+        with:
+          path: ~/mediawiki-releases
+          key: mediawiki-${{ runner.os }}-${{ steps.versions.outputs.version }}-${{ steps.versions.outputs.old_version }}
+      - name: Download the MediaWiki releases
+        if: steps.mediawiki-cache.outputs.cache-hit != 'true'
+        env:
+          VERSION: ${{ steps.versions.outputs.version }}
+          URL: ${{ steps.versions.outputs.url }}
+          OLD_VERSION: ${{ steps.versions.outputs.old_version }}
+          OLD_URL: ${{ steps.versions.outputs.old_url }}
+        run: |
+          MEDIAWIKI_RELEASES=~/mediawiki-releases
+          mkdir -p "$MEDIAWIKI_RELEASES"
+          CURL="curl --fail --location --silent --show-error --retry 3 --retry-all-errors"
+          $CURL -o "$MEDIAWIKI_RELEASES/mediawiki-$VERSION.zip" "$URL"
+          $CURL -o "$MEDIAWIKI_RELEASES/mediawiki-$OLD_VERSION.tar.gz" "$OLD_URL"
+      - name: Extract the MediaWiki releases
+        env:
+          VERSION: ${{ steps.versions.outputs.version }}
+          OLD_VERSION: ${{ steps.versions.outputs.old_version }}
+        run: |
+          MEDIAWIKI_RELEASES=~/mediawiki-releases
+          TARGET="$(cygpath -u "$RUNNER_TEMP")/mediawiki"
+          mkdir -p "$TARGET"
+          7z x -bso0 -bsp0 "$MEDIAWIKI_RELEASES/mediawiki-$VERSION.zip" -o"$(cygpath -w "$TARGET")"
+          tar -xzf "$MEDIAWIKI_RELEASES/mediawiki-$OLD_VERSION.tar.gz" -C "$TARGET"
+          {
+            echo "HAMICHLOL_MEDIAWIKI_DIR=$(cygpath -w "$TARGET/mediawiki-$VERSION")"
+            echo "HAMICHLOL_TEST_OLD_MEDIAWIKI_DIR=$(cygpath -w "$TARGET/mediawiki-$OLD_VERSION")"
+            echo "HAMICHLOL_TEST_MEDIAWIKI_ZIP=$(cygpath -w "$MEDIAWIKI_RELEASES/mediawiki-$VERSION.zip")"
+          } >> "$GITHUB_ENV"
+      - run: npm ci
+      - name: Cache the downloaded servers
+        uses: actions/cache@v6
+        with:
+          path: ~/hamichlol-servers
+          key: servers-${{ runner.os }}-${{ steps.versions.outputs.servers }}
+      # With the app's own download code, as users get them
+      - name: PHP and MariaDB for Windows
+        run: node scripts/download-servers.js ~/hamichlol-servers | tee -a "$GITHUB_ENV"
+      - name: Flow against the downloaded software
+        run: npm run test:system

@@ -122,7 +122,10 @@ npm run dist
 
 - **Scribunto** מריץ את מפרש Lua שמגיע עם ההרחבה (Windows ‏x86/x64, לינוקס x86/x64, ‏macOS ‏x86_64; ב-Mac עם מעבד Apple דרוש Rosetta 2,
   ובלינוקס על ARM אין מפרש מתאים). חילוץ ה-zip מאבד את הרשאת ההרצה שלו, והאפליקציה מחזירה אותה. מגבלות הזמן והזיכרון
-  גבוהות מאלה של האתר (30 שניות, ‏100MB), כי המפרש הזה איטי מ-LuaSandbox שבאתר
+  גבוהות מאלה של האתר (30 שניות, ‏100MB), כי המפרש הזה איטי מ-LuaSandbox שבאתר.
+  ב-Windows ‏Scribunto עוטף את הפקודה שמפעילה את המפרש בזוג מירכאות נוסף, ש-PHP 8 כבר מוסיף בעצמו, ו-`cmd.exe` לא מוצא
+  את המפרש ("The interpreter exited with status 1"). האפליקציה מוחקת את השורה הזו בעותק שלה של Scribunto, רק כשהיא בדיוק
+  כמו בגרסה שפורסמה (ראו [הדיון ב-mediawiki.org](https://www.mediawiki.org/wiki/Topic:W6pj4xql1tjpvfyb))
 - **Math** מציג נוסחאות כ-MathML שנוצר ב-PHP (מצב `native`), בלי שירות חיצוני
 - **SyntaxHighlight** מריץ את Pygments שמגיע עם ההרחבה, ודורש `python3` במחשב. בלי Python (למשל ב-Windows) הקוד מוצג כטקסט רגיל, בלי שגיאה בדף
 - **VisualEditor** מריץ את Parsoid בתוך MediaWiki
@@ -306,7 +309,8 @@ npm run test:system
 ```
 
 ב-GitHub Actions‏ (`.github/workflows/test.yml`) רצות הבדיקות הרגילות בלינוקס, ב-Windows וב-macOS,
-ובנוסף בדיקות המערכת (כולל בדיקת השדרוג) וחלון האפליקציה באובונטו 24.04. שם PHP ו-MariaDB מותקנים
+ובנוסף בדיקות המערכת (כולל בדיקת השדרוג) וחלון האפליקציה באובונטו 24.04. בדיקות המערכת רצות גם ב-Windows, מול PHP ו-MariaDB
+שמורדים בקוד ההורדה של האפליקציה עצמה (`node scripts/download-servers.js <תיקייה>`), כמו שהמשתמשים מקבלים אותם. שם PHP ו-MariaDB מותקנים
 מחבילות אובונטו, וקובצי MediaWiki (הגרסה של `src/versions.js` מאותה כתובת שהאפליקציה מורידה, והגרסה
 הישנה לבדיקת השדרוג) נשמרים במטמון של GitHub Actions לפי הגרסאות, כך שהם יורדים רק כשגרסה משתנה.
 גם קובץ Electron נשמר במטמון. המשתנה `HAMICHLOL_SYSTEM_TESTS_REQUIRED=1` הופך שם תוכנה חסרה לכישלון

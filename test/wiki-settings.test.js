@@ -308,4 +308,88 @@ describe('App-managed wiki settings', function() {
       expect(readSchemaFailure(mw)).to.include({ settings: null });
     });
   });
+describe('Starting Lua on Windows', function() {
+    const { LUA_INTERPRETER_FILE, fixWindowsLuaLaunch } = wikiSettings;
+    // The part of Scribunto's LuaStandaloneInterpreter.php that matters, as released
+    const ORIGINAL = [
+      '<?php',
+      "\t\tif ( php_uname( 's' ) == 'Windows NT' ) {",
+      "\t\t\t// PHP's invokation of cmd.exe in proc_open() is broken:",
+      "\t\t\t$cmd = '\"' . $cmd . '\"';",
+      '\t\t}',
+      ''
+    ].join('\r\n');
+    const interpreter = () => path.join(mw, LUA_INTERPRETER_FILE);
+    const write = content => {
+      fs.mkdirSync(path.dirname(interpreter()), { recursive: true });
+      fs.writeFileSync(interpreter(), content);
+    };
+    const read = () => fs.readFileSync(interpreter(), 'utf8');
+
+    it('should remove the extra quotes around the command', function() {
+      write(ORIGINAL);
+
+      expect(fixWindowsLuaLaunch(mw, 'win32')).to.equal('fixed');
+
+      const fixed = read();
+      expect(fixed).to.not.include(`$cmd = '"' . $cmd . '"';`);
+      expect(fixed).to.include('hamichlol-offline');
+      // Everything else, line endings included, is as it was
+      expect(fixed.split('\r\n')).to.have.length(ORIGINAL.split('\r\n').length);
+      expect(fixed).to.include("if ( php_uname( 's' ) == 'Windows NT' ) {");
+    });
+
+    it('should change nothing the second time', function() {
+      write(ORIGINAL);
+      fixWindowsLuaLaunch(mw, 'win32');
+      const once = read();
+
+      expect(fixWindowsLuaLaunch(mw, 'win32')).to.equal('already-fixed');
+      expect(read()).to.equal(once);
+    });
+
+    it('should leave the file alone on other systems', function() {
+      write(ORIGINAL);
+
+      expect(fixWindowsLuaLaunch(mw, 'linux')).to.equal('not-needed');
+      expect(fixWindowsLuaLaunch(mw, 'darwin')).to.equal('not-needed');
+      expect(read()).to.equal(ORIGINAL);
+    });
+
+    it('should leave a Scribunto that changed as it is', function() {
+      const changed = ORIGINAL.replace(`$cmd = '"' . $cmd . '"';`, '$cmd = wrapForCmd( $cmd );');
+      const twice = ORIGINAL.replace('\t\t}', `\t\t\t$cmd = '"' . $cmd . '"';\r\n\t\t}`);
+      for (const content of [changed, twice]) {
+        write(content);
+        expect(fixWindowsLuaLaunch(mw, 'win32')).to.equal('unrecognised');
+        expect(read()).to.equal(content);
+      }
+    });
+
+    it('should report a file it cannot write instead of throwing', function() {
+      write(ORIGINAL);
+      // The file is written aside first; a folder in that place makes it fail
+      fs.mkdirSync(`${interpreter()}.tmp`);
+
+      expect(fixWindowsLuaLaunch(mw, 'win32')).to.equal('failed');
+      expect(read()).to.equal(ORIGINAL);
+    });
+
+    it('should do nothing without Scribunto', function() {
+      expect(fixWindowsLuaLaunch(mw, 'win32')).to.equal('no-scribunto');
+      expect(fs.existsSync(interpreter())).to.be.false;
+    });
+
+    it('should be applied whenever the settings are written', function() {
+      if (process.platform !== 'win32') {
+        this.skip();
+      }
+      tree(['Scribunto']);
+      write(ORIGINAL);
+
+      writeSettings(mw);
+
+      expect(read()).to.not.include(`$cmd = '"' . $cmd . '"';`);
+    });
+  });
 });
