@@ -121,7 +121,9 @@ const VALID_CONFIG = {
 };
 
 // No test reaches the internet: the app's own downloads may only go to the
-// local test servers (127.0.0.1). Anything else fails at once, as offline.
+// local test servers (127.0.0.1). Anything else fails at once, as offline;
+// and the list of PHP releases is only read where a test points it at one.
+require('../src/versions').DOWNLOADS.php.releases = null;
 require('../src/server-manager').setFetch((url, options) => {
   if (!/^http:\/\/127\.0\.0\.1[:/]/.test(String(url))) {
     return Promise.reject(new Error(`Tests do not download from the internet: ${url}`));

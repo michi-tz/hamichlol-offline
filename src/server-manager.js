@@ -93,8 +93,9 @@ function setFetch(implementation) {
 }
 
 // Downloaded PHP releases that can be used: complete folders (php.exe and the
-// php.ini written after unpacking) of the pinned branch, no older than the
-// pinned release. Newest first.
+// php.ini written after unpacking) of the pinned branch, newest first. One
+// older than the pinned release still runs (a computer may be offline), and is
+// replaced by the next update.
 const PHP_DIR_RE = /^php-(\d+\.\d+\.\d+)$/;
 
 function usablePhpVersions(serverPath) {
@@ -108,7 +109,7 @@ function usablePhpVersions(serverPath) {
     .map(name => PHP_DIR_RE.exec(name))
     .filter(Boolean)
     .map(match => match[1])
-    .filter(version => version.startsWith(`${PHP_BRANCH}.`) && systemTools.compareVersions(version, DOWNLOADS.php.version) >= 0)
+    .filter(version => version.startsWith(`${PHP_BRANCH}.`))
     .filter(version => ['php.exe', 'php.ini'].every(name => fs.existsSync(path.join(serverPath, `php-${version}`, name))))
     .sort((a, b) => systemTools.compareVersions(b, a));
 }
@@ -977,15 +978,22 @@ async function readPhpReleases() {
   if (!releases) {
     throw new Error('no release list');
   }
+  // Raced as well as aborted: not every fetch implementation honours the signal
   const controller = new AbortController();
-  const timer = setTimeout(() => controller.abort(), PHP_RELEASES_TIMEOUT_MS);
+  let timer;
+  const timeout = new Promise((resolve, reject) => {
+    timer = setTimeout(() => {
+      controller.abort();
+      reject(new Error('timed out'));
+    }, PHP_RELEASES_TIMEOUT_MS);
+  });
   let list;
   try {
-    const response = await fetchImpl(releases, { redirect: 'follow', signal: controller.signal });
+    const response = await Promise.race([fetchImpl(releases, { redirect: 'follow', signal: controller.signal }), timeout]);
     if (!response.ok) {
       throw new Error(`HTTP ${response.status}`);
     }
-    list = JSON.parse(await response.text());
+    list = JSON.parse(await Promise.race([response.text(), timeout]));
   } finally {
     clearTimeout(timer);
   }

@@ -755,15 +755,16 @@ describe('Downloads', function() {
         expect(getStatus().tools.php.version).to.equal(release(9));
       });
 
-      it('should not run a folder older than the pinned release', function() {
+      it('should keep running a release older than the pinned one, so nothing has to be downloaded first', function() {
         const [major, minor] = pinned().split('.');
-        const dir = path.join(getPaths().serverPath, `php-${major}.${minor}.0`);
+        const older = `${major}.${minor}.0`;
+        const dir = path.join(getPaths().serverPath, `php-${older}`);
         fs.mkdirSync(dir, { recursive: true });
         fs.writeFileSync(path.join(dir, 'php.exe'), 'MZ');
         fs.writeFileSync(path.join(dir, 'php.ini'), '');
 
-        expect(getPaths().phpVersion).to.equal(pinned());
-        expect(getStatus().downloaded).to.be.false;
+        expect(getPaths().phpVersion).to.equal(older);
+        expect(getStatus().tools.php).to.include({ source: 'bundled', version: older });
       });
     });
 
@@ -863,6 +864,11 @@ describe('Downloads', function() {
       it('should remove the older releases once the newer one runs', async function() {
         publish(newer());
         await updateAsWindows();
+        // Left by an app that pinned an older release
+        const [major, minor] = pinned().split('.');
+        fs.mkdirSync(path.join(getPaths().serverPath, `php-${major}.${minor}.0`));
+        fs.writeFileSync(path.join(getPaths().serverPath, `php-${major}.${minor}.0`, 'php.exe'), 'MZ');
+        fs.writeFileSync(path.join(getPaths().serverPath, `php-${major}.${minor}.0`, 'php.ini'), '');
 
         await removeOlderPhp(newer());
 

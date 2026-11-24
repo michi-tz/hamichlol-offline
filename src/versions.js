@@ -14,8 +14,9 @@
 //   Only the branch is fixed, not the patch release: PHP's security fixes come
 //   as patch releases, so the app downloads the newest release of the branch
 //   that windows.php.net lists (php.releases), checked against the SHA-256
-//   the list gives. PHP_VERSION is the oldest release the app accepts, and
-//   what it downloads when the list cannot be read.
+//   the list gives. PHP_VERSION is the oldest release the app downloads, and
+//   what it downloads when the list cannot be read; a release already
+//   downloaded keeps running until a newer one replaces it.
 // - MediaWiki follows the version the Hamichlol site runs (1.46.2 in November
 //   2026), so pages, templates and modules behave as they do on the site. 1.46
 //   is not an LTS release: when the site upgrades, bump MEDIAWIKI_VERSION too.
