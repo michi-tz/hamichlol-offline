@@ -722,6 +722,16 @@ describe('Downloads', function() {
         }
       });
 
+      it('should not download again a release that did not start here', async function() {
+        publish(newer());
+        fs.mkdirSync(path.join(getPaths().serverPath, `php-${newer()}.failed`), { recursive: true });
+
+        await downloadAsWindows();
+
+        expect(requests).to.not.include(`/${zipName(newer())}`);
+        expect(path.basename(getPaths().phpDir)).to.equal(`php-${pinned()}`);
+      });
+
       it('should never download a release older than the pinned one', async function() {
         const older = `${pinned().split('.').slice(0, 2).join('.')}.0`;
         publish(older);
@@ -771,8 +781,10 @@ describe('Downloads', function() {
     // A PHP the app downloaded is brought up to the newest release of the
     // branch after the servers start; the new release runs from the next start
     describe('Updating the downloaded PHP', function() {
-      const { setAsideFailedPhp, removeOlderPhp } = _internal;
+      const { recoverFromFailedPhp, removeOlderPhp } = _internal;
       const DAY = 24 * 60 * 60 * 1000;
+      // Stands in for running php.exe -v: every release runs but the broken ones
+      const runsUnless = (...broken) => async dir => !broken.some(version => dir.endsWith(`php-${version}`));
       const pinned = () => DOWNLOADS.php.version;
       const newer = () => `${pinned().split('.').slice(0, 2).join('.')}.99`;
       const zipName = version => `php-${version}-Win32-vs16-x64.zip`;
@@ -848,7 +860,7 @@ describe('Downloads', function() {
         publish(newer());
         await updateAsWindows();
 
-        expect(setAsideFailedPhp(newer(), new Error('crashed'))).to.be.true;
+        expect(await recoverFromFailedPhp(newer(), new Error('crashed'), runsUnless(newer()))).to.be.true;
 
         expect(getPaths().phpVersion).to.equal(pinned());
         expect(fs.existsSync(path.join(getPaths().serverPath, `php-${newer()}.failed`))).to.be.true;
@@ -856,9 +868,59 @@ describe('Downloads', function() {
         requests.length = 0;
         expect(await updateAsWindows({ now: Date.now() + 2 * DAY })).to.be.null;
         expect(requests).to.deep.equal(['/releases.json']);
-        // The only release is never set aside
-        expect(setAsideFailedPhp(pinned(), new Error('crashed'))).to.be.false;
+        // The pinned release, when it is the only one, is never set aside
+        expect(await recoverFromFailedPhp(pinned(), new Error('crashed'), runsUnless(pinned()))).to.be.false;
         expect(getPaths().phpVersion).to.equal(pinned());
+      });
+
+      it('should change nothing when the release itself runs, or no other release does', async function() {
+        publish(newer());
+        await updateAsWindows();
+        const before = fs.readdirSync(getPaths().serverPath).sort();
+
+        // A start that failed for another reason (a taken port, say)
+        expect(await recoverFromFailedPhp(newer(), new Error('port taken'), runsUnless())).to.be.false;
+        // Neither release runs: nothing to gain from switching
+        expect(await recoverFromFailedPhp(newer(), new Error('crashed'), runsUnless(newer(), pinned()))).to.be.false;
+
+        expect(fs.readdirSync(getPaths().serverPath).sort()).to.deep.equal(before);
+        expect(getPaths().phpVersion).to.equal(newer());
+      });
+
+      it('should keep the only release when the pinned one cannot be downloaded', async function() {
+        publish(newer());
+        await updateAsWindows();
+        fs.rmSync(path.join(getPaths().serverPath, `php-${pinned()}`), { recursive: true });
+        delete files['/php.zip'];
+
+        Object.defineProperty(process, 'platform', { value: 'win32' });
+        try {
+          expect(await recoverFromFailedPhp(newer(), new Error('crashed'), runsUnless(newer()))).to.be.false;
+        } finally {
+          Object.defineProperty(process, 'platform', platform);
+        }
+
+        expect(getPaths().phpVersion).to.equal(newer());
+        expect(fs.existsSync(path.join(getPaths().serverPath, `php-${newer()}.failed`))).to.be.false;
+      });
+
+      it('should download the pinned release when the only one does not start', async function() {
+        publish(newer());
+        await updateAsWindows();
+        fs.rmSync(path.join(getPaths().serverPath, `php-${pinned()}`), { recursive: true });
+        expect(getPaths().phpVersion).to.equal(newer());
+        requests.length = 0;
+
+        Object.defineProperty(process, 'platform', { value: 'win32' });
+        try {
+          expect(await recoverFromFailedPhp(newer(), new Error('crashed'), runsUnless(newer()))).to.be.true;
+        } finally {
+          Object.defineProperty(process, 'platform', platform);
+        }
+
+        expect(requests).to.deep.equal(['/php.zip']);
+        expect(getPaths().phpVersion).to.equal(pinned());
+        expect(fs.existsSync(path.join(getPaths().serverPath, `php-${newer()}.failed`))).to.be.true;
       });
 
       it('should remove the older releases once the newer one runs', async function() {

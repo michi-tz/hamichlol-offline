@@ -1030,7 +1030,9 @@ function preparePhp(root, finalDir) {
 async function downloadPhp() {
   const { serverPath } = getPaths();
   const latest = await latestPhpRelease();
-  if (latest) {
+  if (latest && fs.existsSync(path.join(serverPath, `php-${latest.version}.failed`))) {
+    console.log(`PHP ${latest.version} did not start here before; downloading PHP ${DOWNLOADS.php.version}`);
+  } else if (latest) {
     try {
       console.log(`Downloading PHP ${latest.version}...`);
       await downloadAndExtract([latest.url], path.join(serverPath, `php-${latest.version}`), { prepare: preparePhp, sha256: latest.sha256 });
@@ -1044,25 +1046,60 @@ async function downloadPhp() {
   return DOWNLOADS.php.version;
 }
 
-// A downloaded PHP release that failed to start is renamed to "<folder>.failed",
-// so the previous release runs instead and the same release is not downloaded
-// again. Only a release that has an older usable one next to it. Returns
-// whether it was set aside.
-function setAsideFailedPhp(version, error) {
-  const { serverPath } = getPaths();
-  const versions = usablePhpVersions(serverPath);
-  if (versions[0] !== version || versions.length < 2) {
+// Whether the PHP in `dir` runs at all, with its own php.ini
+async function phpRuns(dir) {
+  try {
+    await run(path.join(dir, 'php.exe'), ['-c', path.join(dir, 'php.ini'), '-v'], { cwd: dir, timeout: 15000 });
+    return true;
+  } catch (error) {
     return false;
   }
-  const dir = path.join(serverPath, `php-${version}`);
+}
+
+// When the PHP release that runs could not be started: if the release itself
+// is at fault (its php.exe does not even run; a taken port or a slow start is
+// not its fault), it is renamed to "<folder>.failed", so that it is neither
+// run nor downloaded again, and a release that does run takes its place: the
+// one before it, or else the pinned release, downloaded first. Nothing is
+// renamed until that other release has been checked, so a computer that is
+// offline, or where no release runs, keeps what it has. Returns whether
+// another release is ready to be started.
+async function recoverFromFailedPhp(version, error, runs = phpRuns) {
+  const { serverPath } = getPaths();
+  const versions = usablePhpVersions(serverPath);
+  const dirOf = release => path.join(serverPath, `php-${release}`);
+  if (versions[0] !== version || await runs(dirOf(version))) {
+    return false;
+  }
+
+  let replacement = versions[1];
+  if (!replacement) {
+    const pinned = DOWNLOADS.php.version;
+    if (version === pinned || !canDownloadServers()) {
+      return false;
+    }
+    console.error(`PHP ${version} does not run (${error.message}); downloading PHP ${pinned}`);
+    try {
+      await downloadAndExtract(DOWNLOADS.php.urls, dirOf(pinned), { prepare: preparePhp });
+    } catch (downloadError) {
+      console.error(`PHP ${pinned} could not be downloaded: ${downloadError.message}`);
+      return false;
+    }
+    replacement = pinned;
+  }
+  if (!(await runs(dirOf(replacement)))) {
+    console.error(`PHP ${replacement} does not run either; keeping PHP ${version}`);
+    return false;
+  }
+
   try {
-    fs.rmSync(`${dir}.failed`, { recursive: true, force: true });
-    fs.renameSync(dir, `${dir}.failed`);
+    fs.rmSync(`${dirOf(version)}.failed`, { recursive: true, force: true });
+    fs.renameSync(dirOf(version), `${dirOf(version)}.failed`);
   } catch (renameError) {
     console.error(`Could not set PHP ${version} aside: ${renameError.message}`);
     return false;
   }
-  console.error(`PHP ${version} did not start (${error.message}); going back to PHP ${versions[1]}`);
+  console.error(`PHP ${version} does not run (${error.message}); using PHP ${replacement}`);
   return true;
 }
 
@@ -1461,7 +1498,7 @@ async function startPhp() {
     );
   } catch (error) {
     // A newer PHP release that does not start: set it aside, run the one before
-    if (php.source === 'bundled' && setAsideFailedPhp(php.version, error)) {
+    if (php.source === 'bundled' && await recoverFromFailedPhp(php.version, error)) {
       return startPhp();
     }
     throw error;
@@ -2433,7 +2470,7 @@ module.exports = {
     downloadPhp,
     readPhpReleases,
     latestPhpRelease,
-    setAsideFailedPhp,
+    recoverFromFailedPhp,
     removeOlderPhp,
     downloadAndExtract,
     copyMediaWiki,
