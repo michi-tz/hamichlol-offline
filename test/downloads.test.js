@@ -917,15 +917,30 @@ describe('Downloads', function() {
       });
 
       it('should keep the PHP in use when the list or the file cannot be used', async function() {
+        const now = Date.now();
         DOWNLOADS.php.releases = `${baseUrl}/releases.json`;
-        expect(await updateAsWindows()).to.be.null;
+        expect(await updateAsWindows({ now })).to.be.null;
 
         publish(newer(), '0'.repeat(64));
-        expect(await updateAsWindows()).to.be.null;
+        expect(await updateAsWindows({ now: now + DAY })).to.be.null;
+        // The file was downloaded and rejected, not skipped
+        expect(requests).to.include(`/${zipName(newer())}`);
 
         expect(getPaths().phpVersion).to.equal(pinned());
         expect(fs.readdirSync(getPaths().serverPath).filter(name => name.startsWith('php-'))).to.deep.equal([`php-${pinned()}`]);
         expect(getStatus().downloaded).to.be.true;
+      });
+
+      it('should not try again before a day has passed when the list cannot be read', async function() {
+        // E.g. a computer without internet
+        DOWNLOADS.php.releases = `${baseUrl}/releases.json`;
+        const now = Date.now();
+        expect(await updateAsWindows({ now })).to.be.null;
+        expect(await updateAsWindows({ now: now + DAY - 1 })).to.be.null;
+        expect(requests).to.deep.equal(['/releases.json']);
+
+        publish(newer());
+        expect(await updateAsWindows({ now: now + DAY })).to.equal(newer());
       });
 
       it('should keep the release in use when the new one does not run', async function() {
