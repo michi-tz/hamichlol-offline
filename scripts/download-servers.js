@@ -15,6 +15,10 @@ if (!dataDir) {
   process.exit(1);
 }
 
+// Only the two lines below may reach stdout, which the CI job appends to
+// $GITHUB_ENV; the download code's own messages go to stderr
+console.log = console.error;
+
 process.env.DEV_MODE = 'false';
 const serverManager = require('../src/server-manager');
 const { DOWNLOADS } = require('../src/versions');
@@ -33,8 +37,7 @@ async function main() {
     console.error(`Downloading MariaDB ${DOWNLOADS.mariadb.version}...`);
     await downloadAndExtract(DOWNLOADS.mariadb.urls, mariadbDir, { stripRootFolder: true });
   }
-  console.log(`HAMICHLOL_PHP=${phpExe}`);
-  console.log(`HAMICHLOL_MYSQLD=${mysqld}`);
+  process.stdout.write(`HAMICHLOL_PHP=${phpExe}\nHAMICHLOL_MYSQLD=${mysqld}\n`);
 }
 
 main().catch(error => {
