@@ -1036,6 +1036,95 @@ async function downloadPhp() {
   return DOWNLOADS.php.version;
 }
 
+// A downloaded PHP release that failed to start is renamed to "<folder>.failed",
+// so the previous release runs instead and the same release is not downloaded
+// again. Only a release that has an older usable one next to it. Returns
+// whether it was set aside.
+function setAsideFailedPhp(version, error) {
+  const { serverPath } = getPaths();
+  const versions = usablePhpVersions(serverPath);
+  if (versions[0] !== version || versions.length < 2) {
+    return false;
+  }
+  const dir = path.join(serverPath, `php-${version}`);
+  try {
+    fs.rmSync(`${dir}.failed`, { recursive: true, force: true });
+    fs.renameSync(dir, `${dir}.failed`);
+  } catch (renameError) {
+    console.error(`Could not set PHP ${version} aside: ${renameError.message}`);
+    return false;
+  }
+  console.error(`PHP ${version} did not start (${error.message}); going back to PHP ${versions[1]}`);
+  return true;
+}
+
+// Remove the PHP releases older than `version`, which runs now
+async function removeOlderPhp(version) {
+  const { serverPath } = getPaths();
+  for (const older of usablePhpVersions(serverPath).filter(other => systemTools.compareVersions(other, version) < 0)) {
+    await removeQuietly(path.join(serverPath, `php-${older}`));
+    console.log(`Removed PHP ${older}, replaced by PHP ${version}`);
+  }
+}
+
+// Look for a newer PHP release of the branch and download it next to the one
+// in use; it runs from the next start. For a PHP the app downloaded itself,
+// at most once a day, and never in the way: the list has a short timeout,
+// nothing changes until a download is complete and checked, and failures are
+// only logged (a computer without internet keeps its PHP). Returns the
+// version downloaded, or null.
+const PHP_UPDATE_INTERVAL_MS = 24 * 60 * 60 * 1000;
+const PHP_UPDATE_FILE = 'php-update-check.json';
+let phpUpdate = null;
+
+function updatePhp({ now = Date.now() } = {}) {
+  if (!phpUpdate) {
+    phpUpdate = checkForPhpUpdate(now)
+      .catch(error => {
+        console.error(`Could not update PHP: ${error.message}`);
+        return null;
+      })
+      .finally(() => {
+        phpUpdate = null;
+      });
+  }
+  return phpUpdate;
+}
+
+async function checkForPhpUpdate(now) {
+  if (isDevMode() || !canDownloadServers()) {
+    return null;
+  }
+  const php = resolvePhp();
+  if (php.source !== 'bundled') {
+    return null;
+  }
+  const stateFile = path.join(dataPath, PHP_UPDATE_FILE);
+  let checkedAt = null;
+  try {
+    checkedAt = JSON.parse(fs.readFileSync(stateFile, 'utf8')).checkedAt;
+  } catch (error) {
+    // Never checked, or a damaged file: check now
+  }
+  if (Number.isFinite(checkedAt) && checkedAt <= now && now - checkedAt < PHP_UPDATE_INTERVAL_MS) {
+    return null;
+  }
+
+  const latest = await readPhpReleases();
+  fs.writeFileSync(stateFile, JSON.stringify({ checkedAt: now }));
+  if (systemTools.compareVersions(latest.version, php.version) <= 0) {
+    return null;
+  }
+  const target = path.join(getPaths().serverPath, `php-${latest.version}`);
+  if (fs.existsSync(`${target}.failed`)) {
+    return null;
+  }
+  console.log(`Downloading PHP ${latest.version} (PHP ${php.version} is in use)...`);
+  await downloadAndExtract([latest.url], target, { prepare: preparePhp, sha256: latest.sha256 });
+  console.log(`PHP ${latest.version} is ready and runs from the next start`);
+  return latest.version;
+}
+
 async function initializeDatabase() {
   const { dbDataDir } = getPaths();
   const partialDir = `${dbDataDir}.partial`;
@@ -1352,14 +1441,27 @@ async function startPhp() {
   // Also here: the settings, which do it too, are not rewritten after a failed update
   wikiSettings.prepareBundledPrograms(mediaWikiPath);
   const port = await portfinder.getPortPromise({ port: DEFAULT_PHP_PORT });
-  const child = await spawnServer(
-    'PHP',
-    'php',
-    php.exe,
-    phpArgs(php, ['-S', `${LOOPBACK_HOST}:${port}`, '-t', mediaWikiPath]),
-    port,
-    { cwd: php.cwd, env: { ...process.env, [DB_PORT_ENV]: String(mysqlPort) } }
-  );
+  let child;
+  try {
+    child = await spawnServer(
+      'PHP',
+      'php',
+      php.exe,
+      phpArgs(php, ['-S', `${LOOPBACK_HOST}:${port}`, '-t', mediaWikiPath]),
+      port,
+      { cwd: php.cwd, env: { ...process.env, [DB_PORT_ENV]: String(mysqlPort) } }
+    );
+  } catch (error) {
+    // A newer PHP release that does not start: set it aside, run the one before
+    if (php.source === 'bundled' && setAsideFailedPhp(php.version, error)) {
+      return startPhp();
+    }
+    throw error;
+  }
+  if (php.source === 'bundled') {
+    // Only once the newer release serves the wiki
+    removeOlderPhp(php.version).catch(error => console.error(`Could not remove older PHP releases: ${error.message}`));
+  }
 
   phpProcess = child;
   phpPort = port;
@@ -2316,12 +2418,15 @@ module.exports = {
   retrySettingsUpdate,
   startServers,
   stopServers,
+  updatePhp,
   // Building blocks, exported for the tests only
   _internal: {
     configurePhpIni,
     downloadPhp,
     readPhpReleases,
     latestPhpRelease,
+    setAsideFailedPhp,
+    removeOlderPhp,
     downloadAndExtract,
     copyMediaWiki,
     lockRetry,
