@@ -6,6 +6,7 @@ const { describe, it, before, beforeEach, afterEach, after } = require('mocha');
 const { expect } = require('chai');
 const fs = require('fs');
 const net = require('net');
+const os = require('os');
 const path = require('path');
 const { spawn } = require('child_process');
 
@@ -26,6 +27,7 @@ const {
   setDataPath,
   getPaths,
   dbServerArgs,
+  bufferPoolSizeMb,
   cleanupStaleProcesses,
   getStatus,
   downloadServers,
@@ -566,6 +568,23 @@ describe('Server manager building blocks', function() {
       expect(args).to.not.include('--console');
     });
 
+    it('should give InnoDB a buffer pool sized from the memory, for both flavors', function() {
+      for (const flavor of ['mariadb', 'mysql']) {
+        const arg = options(flavor).find(a => a.startsWith('--innodb-buffer-pool-size='));
+        expect(arg, flavor).to.equal(`--innodb-buffer-pool-size=${bufferPoolSizeMb(os.totalmem())}M`);
+      }
+    });
+
+    it('should size the buffer pool at one eighth of the memory, between 128MB and 1GB', function() {
+      const GB = 1024 * 1024 * 1024;
+      expect(bufferPoolSizeMb(512 * 1024 * 1024)).to.equal(128); // low RAM: floor
+      expect(bufferPoolSizeMb(4 * GB)).to.equal(512);
+      expect(bufferPoolSizeMb(8 * GB)).to.equal(1024);
+      expect(bufferPoolSizeMb(64 * GB)).to.equal(1024); // huge RAM: ceiling
+      // Rounded down to a whole MB
+      expect(bufferPoolSizeMb(5 * GB + 7 * 1024 * 1024)).to.equal(640);
+    });
+
     it('should move the socket to a short path when the data folder path is too long', function() {
       if (process.platform === 'win32') {
         this.skip();
@@ -765,8 +784,41 @@ describe('Server manager building blocks', function() {
 
     it('should add that block only once', function() {
       const twice = patch(patch(GENERATED));
-      expect(twice.match(/# Added by Hamichlol Offline/g)).to.have.lengthOf(1);
+      expect(twice.match(/# Added by Hamichlol Offline: keep caches/g)).to.have.lengthOf(1);
       expect(twice.match(/^\$wgCacheDirectory/gm)).to.have.lengthOf(1);
+    });
+
+    it('should enable the file cache in a block of its own, only once', function() {
+      const once = patch(GENERATED);
+      const twice = patch(once);
+
+      expect(once).to.include('# Added by Hamichlol Offline: performance settings\n$wgUseFileCache = true;\n$wgFileCacheDirectory = "$IP/cache/html";');
+      // Until the day changes, since pages can depend on the date
+      expect(once).to.include("$wgCacheEpoch = max( $wgCacheEpoch, gmdate( 'Ymd' ) . '000000' );");
+      // Never for category and file pages, whose lists change without notice
+      expect(once).to.include("$wgHooks['HTMLFileCache::useFileCache'][] = static function ( $context ) {\n\treturn !in_array( $context->getTitle()->getNamespace(), [ NS_CATEGORY, NS_FILE ], true );\n};");
+      expect(twice).to.equal(once);
+      expect(twice.match(/^\$wgUseFileCache/gm)).to.have.lengthOf(1);
+      // $wgJobRunRate was considered and deliberately left out
+      expect(twice).to.not.include('wgJobRunRate');
+    });
+
+    it('should add the file cache to an existing installation that only has the paths block', function() {
+      const { applyPerformanceSettings } = require('../src/server-manager')._internal;
+      const file = path.join(tempDir, 'LocalSettings.php');
+      const old = `${GENERATED}\n${'# Added by Hamichlol Offline: keep caches and logs inside this folder'}\n$wgCacheDirectory = "$IP/cache";\n`;
+      fs.writeFileSync(file, old);
+
+      applyPerformanceSettings(file);
+      const upgraded = fs.readFileSync(file, 'utf8');
+      expect(upgraded.startsWith(old.trimEnd())).to.be.true;
+      expect(upgraded).to.include('$wgUseFileCache = true;');
+
+      // A second run leaves the file alone: same content, not even rewritten
+      const before = fs.statSync(file).mtimeMs;
+      applyPerformanceSettings(file);
+      expect(fs.readFileSync(file, 'utf8')).to.equal(upgraded);
+      expect(fs.statSync(file).mtimeMs).to.equal(before);
     });
 
     it('should produce valid PHP', function() {

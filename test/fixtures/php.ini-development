@@ -23,6 +23,7 @@ memory_limit = 128M
 ;extension=openssl
 ;extension=pdo_mysql
 ;extension=sodium
+;zend_extension=opcache
 
 [Date]
 ;date.timezone =

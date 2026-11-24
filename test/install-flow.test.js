@@ -30,6 +30,8 @@ const { MEDIAWIKI_BRANCH } = require('../src/versions');
 
 const { setDataPath, getPaths, getStatus, installMediaWiki, startServers, stopServers } = serverManager;
 
+const { PHP_SERVER_SETTINGS } = serverManager._internal;
+
 describe('Real installation flow with fake servers', function() {
   this.timeout(30000);
 
@@ -302,10 +304,59 @@ describe('Real installation flow with fake servers', function() {
         dbPort: String(ports.mysqlPort),
         docroot: paths.mediaWikiPath,
         ini: paths.phpIni,
+        args: [
+          '-c', paths.phpIni,
+          ...Object.entries(PHP_SERVER_SETTINGS).flatMap(([name, value]) => ['-d', `${name}=${value}`]),
+          '-S', `127.0.0.1:${ports.phpPort}`, '-t', paths.mediaWikiPath
+        ],
         cwd: paths.phpDir,
         url: '/index.php'
       });
       expect(getStatus()).to.include({ running: true, phpPort: ports.phpPort, mysqlPort: ports.mysqlPort });
+    });
+
+    it('should pass the OPcache and realpath cache settings to the web server only', async function() {
+      const ports = await startServers();
+      const { args } = await (await fetch(`http://127.0.0.1:${ports.phpPort}/index.php`)).json();
+
+      expect(PHP_SERVER_SETTINGS).to.deep.equal({
+        'opcache.enable': '1',
+        'opcache.memory_consumption': '192',
+        'opcache.interned_strings_buffer': '16',
+        'opcache.max_accelerated_files': '20000',
+        realpath_cache_size: '4096K',
+        realpath_cache_ttl: '600'
+      });
+      for (const [name, value] of Object.entries(PHP_SERVER_SETTINGS)) {
+        expect(args.join(' ')).to.include(`-d ${name}=${value}`);
+      }
+      // The extension is loaded by php.ini; loading it twice would warn
+      expect(args.join(' ')).to.not.include('zend_extension');
+      // The installer ran before, without these settings
+      expect(installArgs().join(' ')).to.not.include('opcache');
+    });
+
+    it('should add the file cache settings to an installation that does not have them yet', async function() {
+      const { localSettings } = getPaths();
+      const current = fs.readFileSync(localSettings, 'utf8');
+      const old = current.slice(0, current.indexOf('# Added by Hamichlol Offline: performance settings'));
+      fs.writeFileSync(localSettings, old);
+
+      await startServers();
+      const upgraded = fs.readFileSync(localSettings, 'utf8');
+      expect(upgraded).to.include('$wgUseFileCache = true;');
+      expect(upgraded).to.equal(current);
+
+      // Starting again does not duplicate the block
+      await stopServers();
+      await startServers();
+      expect(fs.readFileSync(localSettings, 'utf8')).to.equal(current);
+    });
+
+    it('should enable OPcache in the app\'s php.ini before starting PHP', async function() {
+      fs.writeFileSync(getPaths().phpIni, 'extension=mysqli\n;zend_extension=opcache\n');
+      await startServers();
+      expect(fs.readFileSync(getPaths().phpIni, 'utf8')).to.equal('extension=mysqli\nzend_extension=opcache\n');
     });
 
     it('should only listen on the loopback interface', async function() {

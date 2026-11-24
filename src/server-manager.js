@@ -42,6 +42,32 @@ const WIKI_LANGUAGE = 'he';
 
 const PHP_EXTENSIONS = ['mysqli', 'intl', 'mbstring', 'fileinfo', 'openssl', 'gd'];
 
+// Runtime tuning for the PHP web server. Without OPcache every request compiles
+// MediaWiki's hundreds of files again, and without a larger realpath cache PHP
+// stats each path on every include. They are passed with -d on the server's
+// command line (not written to php.ini) so they also reach an installed PHP
+// that keeps its own php.ini, and are harmless if OPcache is not loaded.
+// opcache.validate_timestamps stays at its default so edits to LocalSettings.php
+// still take effect. The extension itself is loaded by php.ini (see
+// OPCACHE_EXTENSION_LINE), never with -d: an installed PHP that already loads
+// it would warn about loading it twice.
+const PHP_SERVER_SETTINGS = {
+  'opcache.enable': '1',
+  'opcache.memory_consumption': '192',
+  'opcache.interned_strings_buffer': '16',
+  'opcache.max_accelerated_files': '20000',
+  realpath_cache_size: '4096K',
+  realpath_cache_ttl: '600'
+};
+
+// The commented-out line in php.ini-development that loads OPcache. Only
+// trailing blanks may follow, so line endings and neighbours are kept.
+const OPCACHE_EXTENSION_LINE = /^;zend_extension=opcache[ \t]*(?=\r?$)/m;
+
+// The InnoDB buffer pool defaults to 128MB, too little for a wiki database.
+const MIN_BUFFER_POOL_MB = 128;
+const MAX_BUFFER_POOL_MB = 1024;
+
 // MariaDB renamed its executables (mysqld -> mariadbd, ...). Accept both names.
 const MARIADB_BINARIES = {
   server: ['mariadbd.exe', 'mysqld.exe'],
@@ -298,7 +324,14 @@ function runsAsRoot() {
 function dbServerArgs(database, port) {
   const { dataPath, dbDataDir } = getPaths();
   // --no-defaults must come first; it ignores my.ini / my.cnf of other installations
-  const args = ['--no-defaults', `--datadir=${dbDataDir}`, `--port=${port}`, `--bind-address=${LOOPBACK_HOST}`];
+  const args = [
+    '--no-defaults',
+    `--datadir=${dbDataDir}`,
+    `--port=${port}`,
+    `--bind-address=${LOOPBACK_HOST}`,
+    // Valid for both MariaDB and MySQL
+    `--innodb-buffer-pool-size=${bufferPoolSizeMb(os.totalmem())}M`
+  ];
   if (process.platform === 'win32') {
     args.push('--console');
   } else {
@@ -318,6 +351,13 @@ function dbServerArgs(database, port) {
     args.push('--loose-mysqlx=OFF');
   }
   return args;
+}
+
+// One eighth of the memory, so the wiki does not starve the rest of the
+// computer, within [128, 1024] MB. Takes the amount as a parameter for testing.
+function bufferPoolSizeMb(totalMemoryBytes) {
+  const eighthMb = Math.floor(totalMemoryBytes / 8 / (1024 * 1024));
+  return Math.min(MAX_BUFFER_POOL_MB, Math.max(MIN_BUFFER_POOL_MB, eighthMb));
 }
 
 // Read at call time (not at module load) so the flag can be set after require().
@@ -764,6 +804,47 @@ const LOCAL_PATHS_SETTINGS = [
   ''
 ].join('\n');
 
+// MediaWiki's file cache serves anonymous page views as ready-made HTML files,
+// skipping PHP rendering and most database queries. It is a separate block from
+// the local paths so that existing installations can receive it when the servers
+// start (see applyPerformanceSettings).
+const PERFORMANCE_MARKER = '# Added by Hamichlol Offline: performance settings';
+const PERFORMANCE_SETTINGS = [
+  PERFORMANCE_MARKER,
+  '$wgUseFileCache = true;',
+  '$wgFileCacheDirectory = "$IP/cache/html";',
+  '// Pages can depend on the date, and MediaWiki keeps a cached page until the',
+  '// page itself changes: cached pages expire when the day (UTC) changes',
+  "$wgCacheEpoch = max( $wgCacheEpoch, gmdate( 'Ymd' ) . '000000' );",
+  '// Category and file pages list other pages, and MediaWiki does not throw',
+  '// their cached copies away when those lists change',
+  "$wgHooks['HTMLFileCache::useFileCache'][] = static function ( $context ) {",
+  '\treturn !in_array( $context->getTitle()->getNamespace(), [ NS_CATEGORY, NS_FILE ], true );',
+  '};',
+  ''
+].join('\n');
+
+function addPerformanceSettings(source) {
+  if (source.includes(PERFORMANCE_MARKER)) {
+    return source;
+  }
+  return `${source.replace(/\s*$/, '')}\n\n${PERFORMANCE_SETTINGS}`;
+}
+
+// Idempotent: a file that already has the block is not rewritten. Failing to
+// tune must not stop the wiki from starting, so problems are only logged.
+function applyPerformanceSettings(filePath) {
+  try {
+    const source = fs.readFileSync(filePath, 'utf8');
+    const updated = addPerformanceSettings(source);
+    if (updated !== source) {
+      fs.writeFileSync(filePath, updated);
+    }
+  } catch (error) {
+    console.error(`Failed to apply performance settings: ${error.message}`);
+  }
+}
+
 // Make LocalSettings.php independent of the ports chosen at install time:
 // the server URL is detected per request and the DB port comes from the environment.
 function patchLocalSettings(filePath) {
@@ -777,7 +858,7 @@ function patchLocalSettings(filePath) {
   if (!source.includes(LOCAL_PATHS_MARKER)) {
     source = `${source.replace(/\s*$/, '')}\n\n${LOCAL_PATHS_SETTINGS}`;
   }
-  fs.writeFileSync(filePath, source);
+  fs.writeFileSync(filePath, addPerformanceSettings(source));
 }
 
 // `sourceDir` is where the files are now; `finalDir` is where PHP will run from.
@@ -796,7 +877,30 @@ function configurePhpIni(sourceDir, finalDir) {
       `extension=${extension}`
     );
   }
+  content = content.replace(OPCACHE_EXTENSION_LINE, 'zend_extension=opcache');
   fs.writeFileSync(phpIni, content);
+}
+
+// php.ini files generated by earlier versions of the app do not load OPcache.
+// Only the app's own php.ini is changed, never the one of an installed PHP, and
+// a file without the commented line (such as the dev-mode stand-in) is left alone.
+function enableOpcacheInPhpIni(php) {
+  if (php.source !== 'bundled') {
+    return;
+  }
+  try {
+    const content = fs.readFileSync(php.ini, 'utf8');
+    const updated = content.replace(OPCACHE_EXTENSION_LINE, 'zend_extension=opcache');
+    if (updated !== content) {
+      fs.writeFileSync(php.ini, updated);
+    }
+  } catch (error) {
+    console.error(`Failed to enable OPcache: ${error.message}`);
+  }
+}
+
+function phpServerSettingArgs() {
+  return Object.entries(PHP_SERVER_SETTINGS).flatMap(([name, value]) => ['-d', `${name}=${value}`]);
 }
 
 function phpString(value) {
@@ -1519,13 +1623,14 @@ async function startPhp() {
   // Also here: the settings, which do it too, are not rewritten after a failed update
   wikiSettings.prepareBundledPrograms(mediaWikiPath);
   const port = await portfinder.getPortPromise({ port: DEFAULT_PHP_PORT });
+  enableOpcacheInPhpIni(php);
   let child;
   try {
     child = await spawnServer(
       'PHP',
       'php',
       php.exe,
-      phpArgs(php, ['-S', `${LOOPBACK_HOST}:${port}`, '-t', mediaWikiPath]),
+      phpArgs(php, [...phpServerSettingArgs(), '-S', `${LOOPBACK_HOST}:${port}`, '-t', mediaWikiPath]),
       port,
       { cwd: php.cwd, env: { ...process.env, [DB_PORT_ENV]: String(mysqlPort) } }
     );
@@ -1712,6 +1817,9 @@ async function startServers() {
 
     return { phpPort, mysqlPort };
   }
+
+  // Installations made before the file cache was added get its settings here
+  applyPerformanceSettings(getPaths().localSettings);
 
   const mysqlWasRunning = mysqlProcess !== null;
   try {
@@ -2477,6 +2585,7 @@ module.exports = {
   setDataPath,
   setFetch,
   dbServerArgs,
+  bufferPoolSizeMb,
   getPaths,
   getStatus,
   events,
@@ -2500,6 +2609,11 @@ module.exports = {
   // Building blocks, exported for the tests only
   _internal: {
     configurePhpIni,
+    enableOpcacheInPhpIni,
+    applyPerformanceSettings,
+    phpServerSettingArgs,
+    PHP_SERVER_SETTINGS,
+    PERFORMANCE_MARKER,
     downloadPhp,
     readPhpReleases,
     latestPhpRelease,
