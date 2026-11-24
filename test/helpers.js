@@ -100,6 +100,17 @@ function setEnv(values) {
   };
 }
 
+// Skip a system test whose software is missing, unless the run requires it
+// (HAMICHLOL_SYSTEM_TESTS_REQUIRED, set by CI): then the missing software is
+// a failure, so the suite cannot pass by silently testing nothing.
+function skipUnlessRequired(context, reason) {
+  if (/^(1|true|yes|on)$/i.test(process.env.HAMICHLOL_SYSTEM_TESTS_REQUIRED || '')) {
+    throw new Error(`Required by HAMICHLOL_SYSTEM_TESTS_REQUIRED but ${reason}`);
+  }
+  console.log(`    Skipped: ${reason}`);
+  context.skip();
+}
+
 const VALID_CONFIG = {
   dbName: 'test_wiki',
   dbUser: 'test_user',
@@ -108,6 +119,19 @@ const VALID_CONFIG = {
   adminUser: 'admin',
   adminPassword: 'admin-password-123'
 };
+
+// No test reaches the internet: the app's own downloads may only go to the
+// local test servers (127.0.0.1). Anything else fails at once, as offline;
+// and the list of PHP releases is only read where a test points it at one.
+require('../src/versions').DOWNLOADS.php.releases = null;
+// The PHP folders the tests download hold no real program: take them as running
+require('../src/server-manager')._internal.setPhpCheck(async () => true);
+require('../src/server-manager').setFetch((url, options) => {
+  if (!/^http:\/\/127\.0\.0\.1[:/]/.test(String(url))) {
+    return Promise.reject(new Error(`Tests do not download from the internet: ${url}`));
+  }
+  return fetch(url, options);
+});
 
 module.exports = {
   FAKE_PHP,
@@ -124,5 +148,6 @@ module.exports = {
   readLines,
   occupyPort,
   closeServer,
-  setEnv
+  setEnv,
+  skipUnlessRequired
 };

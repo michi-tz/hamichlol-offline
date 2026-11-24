@@ -8,21 +8,24 @@
 const fs = require('fs');
 const path = require('path');
 const { execFileSync } = require('child_process');
-const { PHP_BRANCH } = require('./versions');
+const { PHP_BRANCH, MEDIAWIKI_BRANCH } = require('./versions');
 
 const IS_WINDOWS = process.platform === 'win32';
 const INSPECT_TIMEOUT_MS = 15000;
 
 // Oldest versions that work with the MediaWiki versions this app installs.
-// PHP has no minimum: only the branch in versions.js is accepted.
+// PHP and MediaWiki have no minimum: only the branch in versions.js is
+// accepted, so the wiki runs the same code as the Hamichlol site.
 const MIN_VERSIONS = {
   mariadb: '10.3.0',
   // 5.7.6 introduced "mysqld --initialize-insecure", which creates the data folder
-  mysql: '5.7.6',
-  mediawiki: '1.39.0'
+  mysql: '5.7.6'
 };
 
 // Extensions MediaWiki cannot run without (gd is optional: thumbnails only).
+// MediaWiki 1.46 checks ctype, dom, fileinfo, iconv, intl, mbstring and xml
+// itself (includes/PHPVersionCheck.php, RELEASE-NOTES-1.46); mysqli is needed
+// for MariaDB / MySQL. json is always built into PHP 8.
 const REQUIRED_PHP_EXTENSIONS = [
   'mysqli', 'ctype', 'dom', 'fileinfo', 'iconv', 'intl', 'json', 'mbstring', 'openssl', 'xml', 'xmlreader'
 ];
@@ -345,8 +348,8 @@ function inspectMediaWiki(dir) {
 
   result.version = match[1];
   result.minPhp = readMediaWikiMinPhp(dir);
-  if (compareVersions(result.version, MIN_VERSIONS.mediawiki) < 0) {
-    result.reason = `נדרשת גרסה ${MIN_VERSIONS.mediawiki} ומעלה`;
+  if (!result.version.startsWith(`${MEDIAWIKI_BRANCH}.`)) {
+    result.reason = `נדרשת גרסה ${MEDIAWIKI_BRANCH}`;
     return result;
   }
   result.usable = true;
@@ -368,11 +371,13 @@ module.exports = {
   ENV,
   MIN_VERSIONS,
   PHP_BRANCH,
+  MEDIAWIKI_BRANCH,
   REQUIRED_PHP_EXTENSIONS,
   isEnabled,
   resetCache,
   compareVersions,
   parseDbServerVersion,
+  readMediaWikiMinPhp,
   findSystemPhp,
   findSystemDatabase,
   findSystemMediaWiki

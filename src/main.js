@@ -85,6 +85,27 @@ function setupApp() {
     // Before the page asks for the status: stand-ins an earlier version's dev
     // mode left in the real data folder would pass for downloaded servers
     await removeDevStandIns().catch(error => console.error('Failed to remove dev mode leftovers:', error));
+    // An upgrade of MediaWiki that a crash cut off is finished or undone before
+    // the page sees the wiki; the page says when one was undone
+    await serverManager.recoverInterruptedUpgrade().then(recovered => {
+      if (recovered && !recovered.completed) {
+        appState.error = {
+          action: 'upgrade',
+          message: `השדרוג ל-MediaWiki ${recovered.to} הופסק באמצע. הוויקי הוחזר לגרסה ${recovered.from}, ואפשר לנסות לשדרג שוב`
+        };
+      }
+    }, error => {
+      console.error('Failed to recover an interrupted MediaWiki upgrade:', error);
+      appState.error = { action: 'upgrade', message: error.message };
+    });
+    // So is an update of the app's settings: the wiki is put back as it was
+    // before it, which the page shows (with sync blocked) from the status
+    if (!appState.error) {
+      await serverManager.recoverInterruptedSettingsUpdate().catch(error => {
+        console.error('Failed to recover an interrupted update of the wiki settings:', error);
+        appState.error = { action: 'settings', message: error.message };
+      });
+    }
     // Stop servers left running by a previous run that crashed or was killed
     cleanupStaleProcesses().catch(error => console.error('Failed to clean up leftover servers:', error));
     createWindow();
@@ -227,6 +248,14 @@ async function runOperation(action, task, errorLabel) {
   }
 }
 
+// Start the servers; then, without waiting, look for a newer PHP release,
+// which is used from the next start
+async function startServers() {
+  const result = await serverManager.startServers();
+  serverManager.updatePhp().catch(error => console.error('PHP update check failed:', error.message));
+  return result;
+}
+
 const operations = {
   download: () => runOperation('download', async () => {
     await downloadServers();
@@ -237,7 +266,7 @@ const operations = {
   }, 'Failed to install MediaWiki'),
 
   start: () => runOperation('start', async () => {
-    return serverManager.startServers();
+    return startServers();
   }, 'Failed to start servers'),
 
   stop: () => runOperation('stop', async () => {
@@ -246,14 +275,45 @@ const operations = {
 
   restart: () => runOperation('restart', async () => {
     await serverManager.stopServers();
-    return serverManager.startServers();
-  }, 'Failed to restart servers')
+    return startServers();
+  }, 'Failed to restart servers'),
+
+  // The servers are stopped for the upgrade and started again afterwards if
+  // they were running, also when it failed: the old wiki is then left in place
+  upgrade: () => runOperation('upgrade', async () => {
+    const wasRunning = getStatus().running;
+    if (wasRunning) {
+      await serverManager.stopServers();
+    }
+    try {
+      await serverManager.upgradeMediaWiki();
+    } catch (error) {
+      if (wasRunning) {
+        await startServers().catch(startError => console.error('Failed to restart servers:', startError.message));
+      }
+      throw error;
+    }
+    return wasRunning ? startServers() : undefined;
+  }, 'Failed to upgrade MediaWiki'),
+
+  // After a failed update of the app's settings the wiki runs as it was, and
+  // the update is only tried again for other settings; this tries it now. The
+  // servers are (re)started for it, since it runs before the wiki starts.
+  retrySettings: () => runOperation('retrySettings', async () => {
+    serverManager.retrySettingsUpdate();
+    if (getStatus().running) {
+      await serverManager.stopServers();
+    }
+    return startServers();
+  }, 'Failed to update the wiki settings')
 };
 
 const menuActions = {
   start: () => operations.start(),
   stop: () => operations.stop(),
   restart: () => operations.restart(),
+  upgrade: () => operations.upgrade(),
+  retrySettings: () => operations.retrySettings(),
   quit: () => app.quit(),
   wikiHome: () => wikiView.goHome(),
   wikiBack: () => wikiView.goBack(),
@@ -294,7 +354,14 @@ const menuActions = {
 
 function updateMenu(status = getStatus()) {
   const template = buildMenuTemplate(
-    { installed: status.installed, running: status.running, busy: appState.busy, wikiShown: wikiView.isShown() },
+    {
+      installed: status.installed,
+      running: status.running,
+      busy: appState.busy,
+      wikiShown: wikiView.isShown(),
+      upgrade: status.upgrade,
+      syncBlocked: status.syncBlocked
+    },
     menuActions
   );
   Menu.setApplicationMenu(Menu.buildFromTemplate(template));
@@ -320,6 +387,10 @@ ipcMain.handle('start-servers', () => operations.start());
 ipcMain.handle('stop-servers', () => operations.stop());
 
 ipcMain.handle('restart-servers', () => operations.restart());
+
+ipcMain.handle('upgrade-mediawiki', () => operations.upgrade());
+
+ipcMain.handle('retry-settings-update', () => operations.retrySettings());
 
 // Live feedback on the administrator's name and password, by the same rules
 // the installation applies

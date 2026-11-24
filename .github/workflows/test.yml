@@ -33,29 +33,85 @@ jobs:
   integration:
     name: Real software and app window (Ubuntu)
     # Pinned to the image whose PHP package is of the branch in src/versions.js;
-    # the app does not use any other PHP, and the tests would only be skipped.
+    # the app does not use any other PHP, and the system tests would fail.
     runs-on: ubuntu-24.04
     timeout-minutes: 30
+    env:
+      # Missing software fails the system tests here instead of skipping them,
+      # so the job cannot pass without testing anything
+      HAMICHLOL_SYSTEM_TESTS_REQUIRED: '1'
+      # The release the system test of a real upgrade starts from (the
+      # previous LTS branch, which the app installed before)
+      MEDIAWIKI_UPGRADE_FROM: 1.43.11
     steps:
       - uses: actions/checkout@v5
       - uses: actions/setup-node@v5
         with:
           node-version: 22
           cache: npm
-      # The runner image ships MySQL; the tests use the distribution's MariaDB,
-      # PHP and MediaWiki, the combination documented in the README.
-      - name: Install PHP, MariaDB and MediaWiki
+      # Versions come from src/versions.js and package-lock.json, so they are
+      # never repeated here
+      - name: Versions
+        id: versions
+        run: |
+          node scripts/mediawiki-release.js "$MEDIAWIKI_UPGRADE_FROM" | tee -a "$GITHUB_OUTPUT"
+          echo "electron=$(node -p "require('./package-lock.json').packages['node_modules/electron'].version")" | tee -a "$GITHUB_OUTPUT"
+      # Distributions do not package MediaWiki of the pinned branch (Ubuntu 24.04
+      # has 1.39), so the tests use the release the app itself downloads
+      - name: Cache the MediaWiki releases
+        id: mediawiki-cache
+        uses: actions/cache@v6
+        with:
+          path: ~/mediawiki-releases
+          key: mediawiki-${{ steps.versions.outputs.version }}-${{ steps.versions.outputs.old_version }}
+      # Only on a cache miss; then it also proves that the app's download URL exists
+      - name: Download the MediaWiki releases
+        if: steps.mediawiki-cache.outputs.cache-hit != 'true'
+        env:
+          VERSION: ${{ steps.versions.outputs.version }}
+          URL: ${{ steps.versions.outputs.url }}
+          OLD_VERSION: ${{ steps.versions.outputs.old_version }}
+          OLD_URL: ${{ steps.versions.outputs.old_url }}
+        run: |
+          MEDIAWIKI_RELEASES=~/mediawiki-releases
+          mkdir -p "$MEDIAWIKI_RELEASES"
+          CURL="curl --fail --location --silent --show-error --retry 3 --retry-all-errors"
+          $CURL -o "$MEDIAWIKI_RELEASES/mediawiki-$VERSION.zip" "$URL"
+          $CURL -o "$MEDIAWIKI_RELEASES/mediawiki-$OLD_VERSION.tar.gz" "$OLD_URL"
+      - name: Extract the MediaWiki releases
+        env:
+          VERSION: ${{ steps.versions.outputs.version }}
+          OLD_VERSION: ${{ steps.versions.outputs.old_version }}
+        run: |
+          MEDIAWIKI_RELEASES=~/mediawiki-releases
+          mkdir -p "$RUNNER_TEMP/mediawiki"
+          unzip -q "$MEDIAWIKI_RELEASES/mediawiki-$VERSION.zip" -d "$RUNNER_TEMP/mediawiki"
+          tar -xzf "$MEDIAWIKI_RELEASES/mediawiki-$OLD_VERSION.tar.gz" -C "$RUNNER_TEMP/mediawiki"
+          {
+            echo "HAMICHLOL_MEDIAWIKI_DIR=$RUNNER_TEMP/mediawiki/mediawiki-$VERSION"
+            echo "HAMICHLOL_TEST_OLD_MEDIAWIKI_DIR=$RUNNER_TEMP/mediawiki/mediawiki-$OLD_VERSION"
+            echo "HAMICHLOL_TEST_MEDIAWIKI_ZIP=$MEDIAWIKI_RELEASES/mediawiki-$VERSION.zip"
+          } >> "$GITHUB_ENV"
+      # The runner image ships MySQL; the tests use the distribution's MariaDB
+      # and PHP, the combination documented in the README.
+      - name: Install PHP and MariaDB
         run: |
           sudo systemctl stop mysql || true
+          # Rebuilding the man page index after every install only costs time here
+          sudo rm -f /var/lib/man-db/auto-update
           sudo apt-get remove --purge -y 'mysql-server*' 'mysql-client*' mysql-common || true
           # The package mirrors are sometimes unreachable for a while, so retry,
           # with short timeouts so that a failed attempt does not take long
           APT_OPTIONS="-o Acquire::Retries=1 -o Acquire::http::Timeout=20 -o Acquire::https::Timeout=20"
           for attempt in 1 2 3; do
             getent hosts archive.ubuntu.com azure.archive.ubuntu.com security.ubuntu.com || echo "Name lookup failed"
+            # Every PHP extension the app requires (REQUIRED_PHP_EXTENSIONS in
+            # src/system-tools.js): mysqli from php-mysql; intl, mbstring; dom,
+            # xml and xmlreader from php-xml; ctype, fileinfo and iconv from
+            # php8.3-common, which php-cli depends on; json and openssl are built in
             if sudo apt-get update $APT_OPTIONS &&
                sudo apt-get install -y --no-install-recommends $APT_OPTIONS \
-                 php-cli php-mysql php-intl php-mbstring php-xml mariadb-server mediawiki xvfb; then
+                 php-cli php-mysql php-intl php-mbstring php-xml mariadb-server xvfb; then
               break
             fi
             if [ "$attempt" = 3 ]; then
@@ -66,6 +122,13 @@ jobs:
             sleep 60
           done
           sudo systemctl stop mariadb || true
+      # npm ci downloads the Electron binary (for the app window tests) unless
+      # it is in Electron's own cache
+      - name: Cache the Electron binary
+        uses: actions/cache@v6
+        with:
+          path: ~/.cache/electron
+          key: electron-${{ runner.os }}-${{ steps.versions.outputs.electron }}
       - run: npm ci
       - name: Flow against the installed software
         run: npm run test:system
@@ -73,3 +136,77 @@ jobs:
         run: xvfb-run -a npm run test:e2e
         env:
           HAMICHLOL_E2E_NO_SANDBOX: '1'
+
+  windows-system:
+    name: Real software (Windows)
+    # The PHP and MariaDB the app downloads on Windows, and MediaWiki's own
+    # Windows code paths (such as how Scribunto starts Lua), are only met here
+    runs-on: windows-latest
+    timeout-minutes: 45
+    defaults:
+      run:
+        shell: bash
+    env:
+      HAMICHLOL_SYSTEM_TESTS_REQUIRED: '1'
+      MEDIAWIKI_UPGRADE_FROM: 1.43.11
+      # Only the system tests run here; the app window is tested on Ubuntu
+      ELECTRON_SKIP_BINARY_DOWNLOAD: '1'
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-node@v5
+        with:
+          node-version: 22
+          cache: npm
+      # Before the versions: finding the PHP release runs the app's own code
+      - run: npm ci
+      - name: Versions
+        id: versions
+        run: |
+          node scripts/mediawiki-release.js "$MEDIAWIKI_UPGRADE_FROM" | tee -a "$GITHUB_OUTPUT"
+          # The PHP release the app would download now: a new patch release
+          # gets a new cache entry instead of an old PHP being kept
+          node scripts/download-servers.js --versions | tee -a "$GITHUB_OUTPUT"
+      - name: Cache the MediaWiki releases
+        id: mediawiki-cache
+        uses: actions/cache@v6
+        with:
+          path: ~/mediawiki-releases
+          key: mediawiki-${{ runner.os }}-${{ steps.versions.outputs.version }}-${{ steps.versions.outputs.old_version }}
+      - name: Download the MediaWiki releases
+        if: steps.mediawiki-cache.outputs.cache-hit != 'true'
+        env:
+          VERSION: ${{ steps.versions.outputs.version }}
+          URL: ${{ steps.versions.outputs.url }}
+          OLD_VERSION: ${{ steps.versions.outputs.old_version }}
+          OLD_URL: ${{ steps.versions.outputs.old_url }}
+        run: |
+          MEDIAWIKI_RELEASES=~/mediawiki-releases
+          mkdir -p "$MEDIAWIKI_RELEASES"
+          CURL="curl --fail --location --silent --show-error --retry 3 --retry-all-errors"
+          $CURL -o "$MEDIAWIKI_RELEASES/mediawiki-$VERSION.zip" "$URL"
+          $CURL -o "$MEDIAWIKI_RELEASES/mediawiki-$OLD_VERSION.tar.gz" "$OLD_URL"
+      - name: Extract the MediaWiki releases
+        env:
+          VERSION: ${{ steps.versions.outputs.version }}
+          OLD_VERSION: ${{ steps.versions.outputs.old_version }}
+        run: |
+          MEDIAWIKI_RELEASES=~/mediawiki-releases
+          TARGET="$(cygpath -u "$RUNNER_TEMP")/mediawiki"
+          mkdir -p "$TARGET"
+          7z x -bso0 -bsp0 "$MEDIAWIKI_RELEASES/mediawiki-$VERSION.zip" -o"$(cygpath -w "$TARGET")"
+          tar -xzf "$MEDIAWIKI_RELEASES/mediawiki-$OLD_VERSION.tar.gz" -C "$TARGET"
+          {
+            echo "HAMICHLOL_MEDIAWIKI_DIR=$(cygpath -w "$TARGET/mediawiki-$VERSION")"
+            echo "HAMICHLOL_TEST_OLD_MEDIAWIKI_DIR=$(cygpath -w "$TARGET/mediawiki-$OLD_VERSION")"
+            echo "HAMICHLOL_TEST_MEDIAWIKI_ZIP=$(cygpath -w "$MEDIAWIKI_RELEASES/mediawiki-$VERSION.zip")"
+          } >> "$GITHUB_ENV"
+      - name: Cache the downloaded servers
+        uses: actions/cache@v6
+        with:
+          path: ~/hamichlol-servers
+          key: servers-${{ runner.os }}-${{ steps.versions.outputs.servers }}
+      # With the app's own download code, as users get them
+      - name: PHP and MariaDB for Windows
+        run: node scripts/download-servers.js ~/hamichlol-servers | tee -a "$GITHUB_ENV"
+      - name: Flow against the downloaded software
+        run: npm run test:system
